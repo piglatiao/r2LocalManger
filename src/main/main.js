@@ -717,17 +717,30 @@ function registerIPCHandlers() {
   // Handler for previewing files
   ipcMain.handle('storage:preview', async (event, key) => {
     try {
+      // 先创建预览窗口显示加载状态
+      createPreviewWindow({ key, loading: true });
+      
+      // 然后加载文件内容
       const previewData = await storageService.previewFile(key);
       
       // 添加 key 到预览数据
       previewData.key = key;
       
-      // 创建预览窗口
-      createPreviewWindow(previewData);
+      // 发送预览数据到已打开的窗口
+      if (previewWindow) {
+        previewWindow.webContents.send('preview:data', previewData);
+      }
       
       return { success: true, data: previewData };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:preview', { key });
+      // 发送错误到预览窗口
+      if (previewWindow) {
+        previewWindow.webContents.send('preview:error', {
+          message: error.message,
+          userMessage: ErrorHandler.getOperationMessage(error, 'preview')
+        });
+      }
       
       // Get user-friendly message
       const userMessage = ErrorHandler.getOperationMessage(error, 'preview');

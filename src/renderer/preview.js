@@ -88,6 +88,12 @@ function handlePreviewData(event, data) {
   const filename = data.key || data.metadata?.filename || '未知文件';
   elements.previewTitle.textContent = titleTemplate.replace('{filename}', filename);
   
+  // 如果是加载状态，显示加载中
+  if (data.loading) {
+    showLoading(UI_TEXT.previewLoadingImage || '正在加载...');
+    return;
+  }
+  
   // 根据预览类型显示不同的查看器
   switch (data.type) {
     case 'image':

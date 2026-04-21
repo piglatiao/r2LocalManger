@@ -276,9 +276,12 @@ class R2Client {
    */
   async getObjectUrl(key) {
     try {
+      // Use R2_PUBLIC_URL if available, otherwise fall back to endpoint
+      // R2_PUBLIC_URL is the custom domain or public bucket URL
+      const publicUrl = process.env.R2_PUBLIC_URL || this.config.publicUrl || this.config.endpoint;
       // Construct the public URL
-      // Format: https://{endpoint}/{bucket}/{key}
-      const url = `${this.config.endpoint}/${this.bucket}/${key}`;
+      // Format: https://{public-url}/{key}
+      const url = `${publicUrl}/${key}`;
       return url;
     } catch (error) {
       throw this._classifyError(error, 'getObjectUrl');
