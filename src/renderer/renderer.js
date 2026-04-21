@@ -111,7 +111,12 @@ const electronAPI = {
   
   openSettings: async () => {
     const result = await ipcRenderer.invoke('settings:openWindow');
-    return result.success;
+    if (!result.success) {
+      const error = new Error(result.error?.message || 'Open settings failed');
+      error.userMessage = result.error?.userMessage || (UI_TEXT.errorUnknown || '打开设置窗口失败');
+      throw error;
+    }
+    return true;
   }
 };
 
@@ -133,6 +138,8 @@ const elements = {
   btnClearDate: document.getElementById('btn-clear-date'),
   objectListBody: document.getElementById('object-list-body'),
   objectListContainer: document.getElementById('object-list-container'),
+  settingsEmbeddedContainer: document.getElementById('settings-embedded-container'),
+  settingsEmbeddedFrame: document.getElementById('settings-embedded-frame'),
   statusText: document.getElementById('status-text'),
   objectCount: document.getElementById('object-count'),
   loading: document.getElementById('loading'),
@@ -160,7 +167,8 @@ const state = {
   searchTerm: '', // 当前搜索词
   filterType: 'all', // 当前文件类型筛选
   filterDateStart: null, // 日期范围筛选 - 开始日期
-  filterDateEnd: null // 日期范围筛选 - 结束日期
+  filterDateEnd: null, // 日期范围筛选 - 结束日期
+  isSettingsEmbeddedOpen: false
 };
 
 // 文件类型图标映射
@@ -246,6 +254,9 @@ function init() {
   
   // 监听来自主进程的错误恢复事件
   setupErrorRecoveryListeners();
+
+  // 监听来自设置页（内嵌 iframe）的关闭消息
+  window.addEventListener('message', handleSettingsEmbeddedMessage);
   
   // 加载对象列表
   loadObjectList();
@@ -1622,12 +1633,82 @@ async function handleRefresh() {
 /**
  * 处理设置按钮点击
  */
+/**
+ * Open settings inside the embedded iframe area.
+ * Keeps toolbar unchanged and only switches lower content area.
+ * @param {Object} options
+ * @param {boolean} options.forceReload - Force iframe reload
+ */
+function openEmbeddedSettings(options = {}) {
+  const { forceReload = false } = options;
+
+  if (!elements.settingsEmbeddedContainer || !elements.settingsEmbeddedFrame || !elements.objectListContainer) {
+    // Fallback for unexpected DOM mismatch
+    window.location.href = 'settings.html?embedded=1';
+    return;
+  }
+
+  const shouldReload = forceReload || !state.isSettingsEmbeddedOpen;
+  if (shouldReload) {
+    elements.settingsEmbeddedFrame.src = `settings.html?embedded=1&t=${Date.now()}`;
+  }
+
+  elements.objectListContainer.style.display = 'none';
+  elements.settingsEmbeddedContainer.style.display = 'block';
+  state.isSettingsEmbeddedOpen = true;
+}
+
+/**
+ * Close embedded settings and show object list area.
+ * @param {Object} options
+ * @param {boolean} options.reload - Reload object list after close
+ */
+function closeEmbeddedSettings(options = {}) {
+  const { reload = false } = options;
+
+  if (elements.settingsEmbeddedContainer) {
+    elements.settingsEmbeddedContainer.style.display = 'none';
+  }
+  if (elements.settingsEmbeddedFrame) {
+    elements.settingsEmbeddedFrame.src = 'about:blank';
+  }
+  if (elements.objectListContainer) {
+    elements.objectListContainer.style.display = 'block';
+  }
+
+  state.isSettingsEmbeddedOpen = false;
+
+  if (reload) {
+    loadObjectList();
+  }
+}
+
+/**
+ * Handle postMessage events from embedded settings page.
+ * @param {MessageEvent} event
+ */
+function handleSettingsEmbeddedMessage(event) {
+  const frameWindow = elements.settingsEmbeddedFrame?.contentWindow;
+  if (!frameWindow || event.source !== frameWindow) {
+    return;
+  }
+
+  const data = event.data;
+  if (!data || typeof data !== 'object') {
+    return;
+  }
+
+  if (data.type === 'settings:close') {
+    closeEmbeddedSettings({ reload: Boolean(data.reload) });
+  }
+}
+
 async function handleSettings() {
   try {
-    await window.electronAPI.openSettings();
+    openEmbeddedSettings({ forceReload: true });
   } catch (error) {
     console.error('打开设置窗口失败:', error);
-    showNotification(UI_TEXT.errorUnknown || '打开设置窗口失败', 'error');
+    showNotification(error.userMessage || UI_TEXT.errorUnknown || '打开设置窗口失败', 'error');
   }
 }
 

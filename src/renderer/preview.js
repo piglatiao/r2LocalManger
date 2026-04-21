@@ -7,7 +7,7 @@
 const { ipcRenderer } = require('electron');
 
 // 获取 UI 文本
-const UI_TEXT = window.UI_TEXT || {};
+var UI_TEXT = window.UI_TEXT || {};
 
 // DOM 元素引用
 const elements = {

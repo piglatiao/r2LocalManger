@@ -58,7 +58,7 @@ var UI_TEXT = {
   // ==================== Error Messages ====================
   errorNetwork: '网络连接失败，请检查网络设置',
   errorAuth: '认证失败，请检查 API 凭证配置',
-  errorAuthDetail: '请确认环境变量 R2_ACCESS_KEY_ID 和 R2_SECRET_ACCESS_KEY 已正确设置',
+  errorAuthDetail: '请先在“设置 > 凭证配置”中填写 R2 凭证，或正确设置环境变量 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY',
   errorBucket: '存储桶不存在或无法访问',
   errorObject: '对象不存在，可能已被删除',
   errorPermission: '权限不足，无法执行此操作',
@@ -71,6 +71,14 @@ var UI_TEXT = {
   errorDownloadFailed: '文件下载失败: {error}',
   errorDeleteFailed: '文件删除失败: {error}',
   errorPreviewFailed: '无法预览文件: {error}',
+
+  // Startup check
+  startupCheckMessageMissingCredentials: '启动检查发现未配置凭证，请先完成配置。',
+  startupCheckMessageInvalidSettings: '启动检查发现 R2 配置无效，请检查 S3 地址、区域、桶名等设置。',
+  startupCheckMessageConnectionFailed: '启动检查失败：无法连接到 R2，请检查配置。',
+  startupCheckDetail: '可点击“检查配置”打开设置页面。',
+  startupCheckButtonOpenSettings: '检查配置',
+  startupCheckButtonLater: '稍后',
   
   // ==================== Progress Messages ====================
   progressUploading: '正在上传 {filename}... {percent}% ({uploaded}/{total})',
@@ -281,6 +289,7 @@ var UI_TEXT = {
   bucketSwitchFailed: '切换存储桶失败',
   bucketNoBuckets: '未找到可用的存储桶',
   bucketAutoSelect: '自动选择',
+  bucketManualHint: '可手动填写桶名，也可通过下方“刷新”后选择。',
   
   // Settings buttons
   settingsButtonSave: '保存设置',
@@ -298,6 +307,13 @@ var UI_TEXT = {
   endpointUrl: '端点 URL',
   endpointRegion: '区域',
   endpointDescription: 'R2 API 端点配置（高级设置）',
+  endpointHelp: '支持输入完整 URL；未填写协议时默认使用 https://',
+  endpointRequired: '请填写 S3 地址（Endpoint）',
+  bucketRequired: '请填写桶名',
+
+  // Public URL / custom domain
+  publicUrl: '自定义域名',
+  publicUrlHelp: '可选。用于生成文件访问链接；不填写时使用 S3 地址。',
   
   // Security
   securityTitle: '安全设置',

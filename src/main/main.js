@@ -9,7 +9,7 @@ const { UI_TEXT } = require('../../i18n/zh-CN');
 
 // Import application services
 const { CredentialManager } = require('./application/CredentialManager');
-const { R2Client } = require('./infrastructure/R2Client');
+const { R2Client, ErrorType } = require('./infrastructure/R2Client');
 const { StorageService, URLFormat } = require('./application/StorageService');
 const { ClipboardManager } = require('./infrastructure/ClipboardManager');
 const { ErrorLogger } = require('./application/ErrorLogger');
@@ -21,6 +21,354 @@ let previewWindow = null;
 
 // 导出配置函数供其他模块使用
 module.exports = {};
+
+const DEFAULT_R2_ENDPOINT = 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com';
+const DEFAULT_R2_REGION = 'auto';
+const DEFAULT_R2_BUCKET = 'picture';
+const DEFAULT_R2_PUBLIC_URL = '';
+const STARTUP_CHECK_TIMEOUT_MS = 10000;
+
+const StartupCheckStatus = {
+  OK: 'OK',
+  MISSING_CREDENTIALS: 'MISSING_CREDENTIALS',
+  INVALID_SETTINGS: 'INVALID_SETTINGS',
+  CONNECTION_FAILED: 'CONNECTION_FAILED'
+};
+
+/**
+ * 标准化 URL（自动补全 https://，并去掉末尾 /）
+ * @param {string} rawUrl - 原始 URL
+ * @param {Object} options - 选项
+ * @param {boolean} options.allowEmpty - 是否允许空值
+ * @returns {string} 标准化 URL
+ */
+function normalizeUrl(rawUrl, options = {}) {
+  const { allowEmpty = false } = options;
+  const rawValue = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+
+  if (!rawValue) {
+    if (allowEmpty) {
+      return '';
+    }
+    throw new Error('URL is required');
+  }
+
+  const withProtocol = /^https?:\/\//i.test(rawValue) ? rawValue : `https://${rawValue}`;
+  const normalized = withProtocol.replace(/\/+$/, '');
+
+  // Validate URL format
+  new URL(normalized);
+
+  return normalized;
+}
+
+/**
+ * 获取并标准化 R2 配置（endpoint/region/bucket/publicUrl）
+ * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}}
+ */
+function getR2Settings() {
+  try {
+    const Store = require('electron-store');
+    const store = new Store({ name: 'settings' });
+
+    const endpointRaw = store.get('r2Endpoint', process.env.R2_ENDPOINT || DEFAULT_R2_ENDPOINT);
+    const regionRaw = store.get('r2Region', process.env.R2_REGION || DEFAULT_R2_REGION);
+    const bucketRaw = store.get('currentBucket', process.env.R2_BUCKET || DEFAULT_R2_BUCKET);
+    const publicUrlRaw = store.get('r2PublicUrl', process.env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_URL);
+
+    let endpoint;
+    let publicUrl;
+    try {
+      endpoint = normalizeUrl(endpointRaw);
+    } catch {
+      endpoint = DEFAULT_R2_ENDPOINT;
+    }
+
+    try {
+      publicUrl = normalizeUrl(publicUrlRaw, { allowEmpty: true });
+    } catch {
+      publicUrl = DEFAULT_R2_PUBLIC_URL;
+    }
+
+    const region = String(regionRaw || DEFAULT_R2_REGION).trim() || DEFAULT_R2_REGION;
+    const bucket = String(bucketRaw || DEFAULT_R2_BUCKET).trim() || DEFAULT_R2_BUCKET;
+
+    return {
+      endpoint,
+      region,
+      bucket,
+      publicUrl
+    };
+  } catch {
+    return {
+      endpoint: DEFAULT_R2_ENDPOINT,
+      region: DEFAULT_R2_REGION,
+      bucket: DEFAULT_R2_BUCKET,
+      publicUrl: DEFAULT_R2_PUBLIC_URL
+    };
+  }
+}
+
+/**
+ * 合并并标准化 R2 配置
+ * @param {Object} input - 输入配置（可选）
+ * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}}
+ */
+function resolveR2Settings(input = {}, options = {}) {
+  const { requireBucket = true } = options;
+  const base = getR2Settings();
+
+  const merged = {
+    endpoint: typeof input.endpoint === 'string' ? input.endpoint : base.endpoint,
+    region: typeof input.region === 'string' ? input.region : base.region,
+    bucket: typeof input.bucket === 'string' ? input.bucket : base.bucket,
+    publicUrl: typeof input.publicUrl === 'string' ? input.publicUrl : base.publicUrl
+  };
+
+  const endpoint = normalizeUrl(merged.endpoint);
+  const region = String(merged.region || DEFAULT_R2_REGION).trim() || DEFAULT_R2_REGION;
+  const bucket = String(merged.bucket || '').trim();
+  if (requireBucket && !bucket) {
+    throw new Error('Bucket name is required');
+  }
+
+  const publicUrl = normalizeUrl(merged.publicUrl, { allowEmpty: true });
+
+  return {
+    endpoint,
+    region,
+    bucket,
+    publicUrl
+  };
+}
+
+/**
+ * 保存 R2 配置到本地设置
+ * @param {Object} input - 输入配置（至少包含 endpoint/region/bucket/publicUrl 中的一部分）
+ * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}} 已保存配置
+ */
+function saveR2Settings(input = {}) {
+  const settings = resolveR2Settings(input);
+  const Store = require('electron-store');
+  const store = new Store({ name: 'settings' });
+
+  store.set('r2Endpoint', settings.endpoint);
+  store.set('r2Region', settings.region);
+  store.set('currentBucket', settings.bucket);
+  store.set('r2PublicUrl', settings.publicUrl);
+
+  return settings;
+}
+
+/**
+ * 从本地安全存储读取凭证
+ * @returns {Object|null} 凭证对象或 null
+ */
+function loadStoredCredentials() {
+  try {
+    const { safeStorage } = require('electron');
+    const Store = require('electron-store');
+    const store = new Store({ name: 'credentials' });
+
+    const encryptedAccessKey = store.get('accessKeyId');
+    const encryptedSecretKey = store.get('secretAccessKey');
+
+    if (!encryptedAccessKey || !encryptedSecretKey) {
+      return null;
+    }
+
+    let accessKeyId;
+    let secretAccessKey;
+
+    if (safeStorage.isEncryptionAvailable()) {
+      accessKeyId = safeStorage.decryptString(Buffer.from(encryptedAccessKey, 'base64'));
+      secretAccessKey = safeStorage.decryptString(Buffer.from(encryptedSecretKey, 'base64'));
+    } else {
+      accessKeyId = Buffer.from(encryptedAccessKey, 'base64').toString('utf8');
+      secretAccessKey = Buffer.from(encryptedSecretKey, 'base64').toString('utf8');
+    }
+
+    const credentials = { accessKeyId, secretAccessKey };
+    return CredentialManager.validateCredentials(credentials) ? credentials : null;
+  } catch (error) {
+    ErrorLogger.logError(error, 'credentials:loadStored');
+    return null;
+  }
+}
+
+/**
+ * 解析当前可用凭证（优先本地保存，其次环境变量）
+ * @returns {Object|null} 凭证对象或 null
+ */
+function resolveCredentials() {
+  const storedCredentials = loadStoredCredentials();
+  if (storedCredentials) {
+    return storedCredentials;
+  }
+
+  try {
+    const envCredentials = CredentialManager.loadCredentials();
+    return CredentialManager.validateCredentials(envCredentials) ? envCredentials : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 创建 R2 配置对象
+ * @param {Object} credentials - 凭证对象
+ * @param {Object} r2SettingsInput - R2 配置（可选）
+ * @returns {Object} R2 配置
+ */
+function buildR2Config(credentials, r2SettingsInput = {}) {
+  const settings = resolveR2Settings(r2SettingsInput);
+
+  return {
+    endpoint: settings.endpoint,
+    region: settings.region,
+    bucket: settings.bucket,
+    publicUrl: settings.publicUrl,
+    accessKeyId: credentials.accessKeyId,
+    secretAccessKey: credentials.secretAccessKey
+  };
+}
+
+/**
+ * 用当前凭证初始化存储服务
+ * @param {Object} credentials - 凭证对象
+ * @param {Object} r2SettingsInput - R2 配置（可选）
+ */
+function initializeStorageService(credentials, r2SettingsInput = {}) {
+  const config = buildR2Config(credentials, r2SettingsInput);
+  const r2Client = new R2Client(config);
+  storageService = new StorageService(r2Client);
+}
+
+/**
+ * 获取可用的存储服务实例，若未初始化则抛出认证错误
+ * @param {string} operation - 当前操作类型
+ * @returns {StorageService} 可用的存储服务实例
+ */
+function getStorageServiceOrThrow(operation) {
+  if (storageService) {
+    return storageService;
+  }
+
+  const error = new Error('Storage service is not initialized');
+  error.errorType = ErrorType.AUTH;
+  error.operation = operation || 'unknown';
+  error.code = 'SERVICE_NOT_READY';
+  throw error;
+}
+
+/**
+ * Promise 超时包装
+ * @param {number} timeoutMs - 超时时间（毫秒）
+ * @returns {Promise<never>}
+ */
+function createTimeoutPromise(timeoutMs) {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      const timeoutError = new Error('Startup connection check timeout');
+      timeoutError.code = 'STARTUP_TIMEOUT';
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+}
+
+/**
+ * 启动健康检查：检查配置与连接可用性
+ * @returns {Promise<{ok: boolean, status: string, error?: Error}>}
+ */
+async function runStartupHealthCheck() {
+  const credentials = resolveCredentials();
+  if (!CredentialManager.validateCredentials(credentials)) {
+    storageService = null;
+    return {
+      ok: false,
+      status: StartupCheckStatus.MISSING_CREDENTIALS
+    };
+  }
+
+  let r2Settings;
+  try {
+    r2Settings = resolveR2Settings();
+  } catch (error) {
+    storageService = null;
+    ErrorLogger.logError(error, 'startup:resolveR2Settings');
+    return {
+      ok: false,
+      status: StartupCheckStatus.INVALID_SETTINGS,
+      error
+    };
+  }
+
+  try {
+    const config = buildR2Config(credentials, r2Settings);
+    const r2Client = new R2Client(config);
+
+    // 启动时做一次轻量连接探测，失败则提示用户检查配置
+    await Promise.race([
+      r2Client.listObjects(),
+      createTimeoutPromise(STARTUP_CHECK_TIMEOUT_MS)
+    ]);
+
+    storageService = new StorageService(r2Client);
+    return {
+      ok: true,
+      status: StartupCheckStatus.OK
+    };
+  } catch (error) {
+    storageService = null;
+    ErrorLogger.logError(error, 'startup:connectivityCheck');
+    return {
+      ok: false,
+      status: StartupCheckStatus.CONNECTION_FAILED,
+      error
+    };
+  }
+}
+
+/**
+ * 启动检查失败时提示用户检查配置
+ * @param {{ok: boolean, status: string, error?: Error}} startupCheckResult - 启动检查结果
+ */
+async function promptStartupCheckFailure(startupCheckResult) {
+  if (!mainWindow || startupCheckResult.ok) {
+    return;
+  }
+
+  let message = UI_TEXT.startupCheckMessageConnectionFailed || '启动检查失败：无法连接到 R2，请检查配置。';
+  let detail = UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。';
+
+  if (startupCheckResult.status === StartupCheckStatus.MISSING_CREDENTIALS) {
+    message = UI_TEXT.startupCheckMessageMissingCredentials || '启动检查发现未配置凭证，请先完成配置。';
+    detail = UI_TEXT.errorAuthDetail || '请先在“设置 > 凭证配置”中填写 R2 凭证，或正确设置环境变量 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY';
+  } else if (startupCheckResult.status === StartupCheckStatus.INVALID_SETTINGS) {
+    message = UI_TEXT.startupCheckMessageInvalidSettings || '启动检查发现 R2 配置无效，请检查 S3 地址、区域、桶名等设置。';
+    detail = startupCheckResult.error?.message || (UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。');
+  } else if (startupCheckResult.status === StartupCheckStatus.CONNECTION_FAILED) {
+    const errorMessage = startupCheckResult.error?.message ? `\n${startupCheckResult.error.message}` : '';
+    detail = `${UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。'}${errorMessage}`;
+  }
+
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: UI_TEXT.mainWindowTitle || 'R2 存储管理器',
+    message,
+    detail,
+    buttons: [
+      UI_TEXT.startupCheckButtonOpenSettings || '检查配置',
+      UI_TEXT.startupCheckButtonLater || '稍后'
+    ],
+    defaultId: 0,
+    cancelId: 1
+  });
+
+  if (result.response === 0) {
+    createSettingsWindow();
+  }
+}
 
 // ==================== Preview Window ====================
 
@@ -120,34 +468,17 @@ function createWindow() {
 }
 
 // 当 Electron 完成初始化时创建窗口
-app.on('ready', () => {
-  // Initialize services using CredentialManager
+app.on('ready', async () => {
+  let startupCheckResult = {
+    ok: false,
+    status: StartupCheckStatus.CONNECTION_FAILED
+  };
+
   try {
-    // Step 1: Load credentials and get configuration using CredentialManager
-    const config = CredentialManager.getConfig();
-    
-    // Step 2: Initialize R2Client with configuration
-    const r2Client = new R2Client(config);
-    
-    // Step 3: Initialize StorageService with R2Client
-    storageService = new StorageService(r2Client);
+    startupCheckResult = await runStartupHealthCheck();
   } catch (error) {
-    // Step 4: Handle initialization errors with Simplified Chinese error dialog
-    // Determine the appropriate error message
-    let errorTitle = UI_TEXT.mainWindowTitle;
-    let errorMessage = UI_TEXT.errorUnknown;
-    
-    if (error.code === 'MISSING_CREDENTIALS' || error.code === 'INVALID_CREDENTIALS') {
-      // Credentials missing or invalid - show authentication error with details
-      errorMessage = `${UI_TEXT.errorAuth}\n\n${UI_TEXT.errorAuthDetail}`;
-    } else {
-      // Other initialization errors
-      errorMessage = `无法初始化存储服务: ${error.message}`;
-    }
-    
-    dialog.showErrorBox(errorTitle, errorMessage);
-    app.quit();
-    return;
+    storageService = null;
+    ErrorLogger.logError(error, 'app:ready:startupHealthCheck');
   }
 
   // Register dialog handlers
@@ -160,6 +491,14 @@ app.on('ready', () => {
   registerSettingsHandlers();
 
   createWindow();
+
+  if (!startupCheckResult.ok) {
+    try {
+      await promptStartupCheckFailure(startupCheckResult);
+    } catch (promptError) {
+      ErrorLogger.logError(promptError, 'app:ready:startupPrompt');
+    }
+  }
 });
 
 // 当所有窗口关闭时退出应用（macOS 除外）
@@ -353,7 +692,8 @@ function registerDialogHandlers() {
         onRefresh: async () => {
           // Refresh the object list
           try {
-            const objects = await storageService.listObjects();
+            const activeStorageService = getStorageServiceOrThrow('list');
+            const objects = await activeStorageService.listObjects();
             event.sender.send('storage:list:updated', { objects });
           } catch (refreshError) {
             ErrorLogger.logError(refreshError, 'error:refresh');
@@ -362,13 +702,16 @@ function registerDialogHandlers() {
         onReauth: async () => {
           // Check credentials and show appropriate message
           try {
-            CredentialManager.validateCredentials(CredentialManager.loadCredentials());
+            const credentials = resolveCredentials();
+            if (!CredentialManager.validateCredentials(credentials)) {
+              throw new Error('Missing credentials');
+            }
             // If validation passes, credentials might be correct but permissions are wrong
             await dialog.showMessageBox(mainWindow, {
               type: 'info',
               buttons: [UI_TEXT.dialogButtonOk],
               title: UI_TEXT.mainWindowTitle,
-              message: UI_TEXT.errorAuthDetail || '请确认环境变量 R2_ACCESS_KEY_ID 和 R2_SECRET_ACCESS_KEY 已正确设置'
+              message: UI_TEXT.errorAuthDetail || '请先在设置中配置 R2 凭证'
             });
           } catch (credError) {
             // Credentials are invalid
@@ -377,7 +720,7 @@ function registerDialogHandlers() {
               buttons: [UI_TEXT.dialogButtonOk],
               title: UI_TEXT.mainWindowTitle,
               message: UI_TEXT.errorAuth || '认证失败，请检查 API 凭证配置',
-              detail: UI_TEXT.errorAuthDetail || '请确认环境变量 R2_ACCESS_KEY_ID 和 R2_SECRET_ACCESS_KEY 已正确设置'
+              detail: UI_TEXT.errorAuthDetail || '请先在设置中配置 R2 凭证'
             });
           }
         },
@@ -443,7 +786,8 @@ function registerIPCHandlers() {
   // Handler for listing objects
   ipcMain.handle('storage:list', async (event) => {
     try {
-      const objects = await storageService.listObjects();
+      const activeStorageService = getStorageServiceOrThrow('list');
+      const objects = await activeStorageService.listObjects();
       return { success: true, data: objects };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:list');
@@ -470,6 +814,8 @@ function registerIPCHandlers() {
   // Handler for uploading files with progress updates
   ipcMain.handle('storage:upload', async (event, filePath) => {
     try {
+      const activeStorageService = getStorageServiceOrThrow('upload');
+
       // Progress callback to send updates to renderer
       const onProgress = (loaded, total) => {
         const percent = total > 0 ? Math.round((loaded / total) * 100) : 0;
@@ -491,7 +837,7 @@ function registerIPCHandlers() {
         });
       };
 
-      const result = await storageService.uploadFile(filePath, onProgress);
+      const result = await activeStorageService.uploadFile(filePath, onProgress);
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:upload', { filePath });
@@ -518,6 +864,8 @@ function registerIPCHandlers() {
   // Handler for uploading buffer (for drag and drop support)
   ipcMain.handle('storage:upload-buffer', async (event, { name, buffer, type }) => {
     try {
+      const activeStorageService = getStorageServiceOrThrow('upload');
+
       // Convert ArrayBuffer to Buffer if needed
       const nodeBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
       
@@ -541,7 +889,7 @@ function registerIPCHandlers() {
         });
       };
 
-      const result = await storageService.uploadBuffer(name, nodeBuffer, type, onProgress);
+      const result = await activeStorageService.uploadBuffer(name, nodeBuffer, type, onProgress);
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:upload-buffer', { name });
@@ -568,6 +916,8 @@ function registerIPCHandlers() {
   // Handler for downloading files with progress updates
   ipcMain.handle('storage:download', async (event, key, savePath) => {
     try {
+      const activeStorageService = getStorageServiceOrThrow('download');
+
       // Progress callback to send updates to renderer
       const onProgress = (loaded, total) => {
         const percent = total > 0 ? Math.round((loaded / total) * 100) : 0;
@@ -588,7 +938,7 @@ function registerIPCHandlers() {
         });
       };
 
-      await storageService.downloadFile(key, savePath, onProgress);
+      await activeStorageService.downloadFile(key, savePath, onProgress);
       return { success: true };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:download', { key, savePath });
@@ -615,7 +965,8 @@ function registerIPCHandlers() {
   // Handler for deleting files
   ipcMain.handle('storage:delete', async (event, key) => {
     try {
-      await storageService.deleteFile(key);
+      const activeStorageService = getStorageServiceOrThrow('delete');
+      await activeStorageService.deleteFile(key);
       return { success: true };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:delete', { key });
@@ -642,7 +993,8 @@ function registerIPCHandlers() {
   // Handler for batch deleting files
   ipcMain.handle('storage:delete-batch', async (event, keys) => {
     try {
-      const result = await storageService.deleteFiles(keys);
+      const activeStorageService = getStorageServiceOrThrow('delete');
+      const result = await activeStorageService.deleteFiles(keys);
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:delete-batch', { keys });
@@ -668,60 +1020,81 @@ function registerIPCHandlers() {
 
   // Handler for batch downloading files
   ipcMain.handle('storage:download-batch', async (event, keys, folderPath) => {
-    const results = {
-      downloaded: [],
-      errors: []
-    };
-    
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const current = i + 1;
-      const total = keys.length;
-      
-      try {
-        // Construct the save path using the original object name
-        const savePath = path.join(folderPath, key);
-        
-        // Progress callback to send updates to renderer
-        const onProgress = (loaded, totalBytes) => {
-          const percent = totalBytes > 0 ? Math.round((loaded / totalBytes) * 100) : 0;
-          const downloadedFormatted = formatBytes(loaded);
-          const totalFormatted = formatBytes(totalBytes);
-          
-          // Send progress update to renderer
-          event.sender.send('storage:download-batch:progress', {
-            filename: key,
-            current,
-            total,
-            percent,
-            loaded,
-            totalBytes,
-            message: UI_TEXT.progressBatchDownloadingFile
-              .replace('{filename}', key)
-              .replace('{current}', current)
-              .replace('{total}', total)
-          });
-        };
-        
-        await storageService.downloadFile(key, savePath, onProgress);
-        results.downloaded.push(key);
-      } catch (error) {
-        ErrorLogger.logError(error, 'storage:download-batch', { key, folderPath });
-        results.errors.push({ key, error: error.message });
+    try {
+      const activeStorageService = getStorageServiceOrThrow('download');
+      const results = {
+        downloaded: [],
+        errors: []
+      };
+
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const current = i + 1;
+        const total = keys.length;
+
+        try {
+          // Construct the save path using the original object name
+          const savePath = path.join(folderPath, key);
+
+          // Progress callback to send updates to renderer
+          const onProgress = (loaded, totalBytes) => {
+            const percent = totalBytes > 0 ? Math.round((loaded / totalBytes) * 100) : 0;
+
+            // Send progress update to renderer
+            event.sender.send('storage:download-batch:progress', {
+              filename: key,
+              current,
+              total,
+              percent,
+              loaded,
+              totalBytes,
+              message: UI_TEXT.progressBatchDownloadingFile
+                .replace('{filename}', key)
+                .replace('{current}', current)
+                .replace('{total}', total)
+            });
+          };
+
+          await activeStorageService.downloadFile(key, savePath, onProgress);
+          results.downloaded.push(key);
+        } catch (error) {
+          ErrorLogger.logError(error, 'storage:download-batch', { key, folderPath });
+          results.errors.push({ key, error: error.message });
+        }
       }
+
+      return { success: true, data: results };
+    } catch (error) {
+      ErrorLogger.logError(error, 'storage:download-batch:init', { keyCount: keys ? keys.length : 0 });
+
+      const userMessage = ErrorHandler.getOperationMessage(error, 'download');
+
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: userMessage,
+          errorType: error.errorType,
+          operation: 'download',
+          fileSystemCode: error.fileSystemCode,
+          isRetryable: ErrorHandler.isRetryable(error),
+          shouldRefreshList: ErrorHandler.shouldRefreshList(error),
+          isAuthError: ErrorHandler.isAuthError(error)
+        }
+      };
     }
-    
-    return { success: true, data: results };
   });
 
   // Handler for previewing files
   ipcMain.handle('storage:preview', async (event, key) => {
     try {
+      const activeStorageService = getStorageServiceOrThrow('preview');
+
       // 先创建预览窗口显示加载状态
       createPreviewWindow({ key, loading: true });
       
       // 然后加载文件内容
-      const previewData = await storageService.previewFile(key);
+      const previewData = await activeStorageService.previewFile(key);
       
       // 添加 key 到预览数据
       previewData.key = key;
@@ -764,8 +1137,10 @@ function registerIPCHandlers() {
   // Handler for copying URL to clipboard
   ipcMain.handle('storage:copy-url', async (event, key, format) => {
     try {
+      const activeStorageService = getStorageServiceOrThrow('copy-url');
+
       // Get formatted URL
-      const formattedUrl = await storageService.getFileUrl(key, format || URLFormat.URL);
+      const formattedUrl = await activeStorageService.getFileUrl(key, format || URLFormat.URL);
       
       // Copy to clipboard
       const copied = ClipboardManager.writeText(formattedUrl);
@@ -827,6 +1202,10 @@ let settingsWindow = null;
 function createSettingsWindow() {
   // 如果已有设置窗口，聚焦它
   if (settingsWindow) {
+    if (settingsWindow.isMinimized()) {
+      settingsWindow.restore();
+    }
+    settingsWindow.show();
     settingsWindow.focus();
     return;
   }
@@ -850,6 +1229,12 @@ function createSettingsWindow() {
   
   // 加载设置窗口 HTML
   settingsWindow.loadFile(path.join(__dirname, '../renderer/settings.html'));
+
+  // 确保窗口创建后可见并聚焦，避免“点击设置无反应”的感知问题
+  settingsWindow.once('ready-to-show', () => {
+    settingsWindow.show();
+    settingsWindow.focus();
+  });
   
   // 窗口关闭时清理引用
   settingsWindow.on('closed', () => {
@@ -865,55 +1250,61 @@ function createSettingsWindow() {
 function registerSettingsHandlers() {
   // Handler for getting credentials
   ipcMain.handle('settings:getCredentials', async (event) => {
+    const credentials = resolveCredentials();
+    return {
+      success: true,
+      data: credentials
+    };
+  });
+
+  // Handler for getting R2 endpoint/bucket/public URL configuration
+  ipcMain.handle('settings:getR2Config', async (event) => {
+    return {
+      success: true,
+      data: getR2Settings()
+    };
+  });
+
+  // Handler for saving R2 endpoint/bucket/public URL configuration
+  ipcMain.handle('settings:saveR2Config', async (event, r2Config) => {
     try {
-      // Try to load from secure storage first
-      const { safeStorage } = require('electron');
-      const Store = require('electron-store');
-      const store = new Store({ name: 'credentials' });
-      
-      const encryptedAccessKey = store.get('accessKeyId');
-      const encryptedSecretKey = store.get('secretAccessKey');
-      
-      if (encryptedAccessKey && encryptedSecretKey) {
-        // Decrypt credentials
-        let accessKeyId, secretAccessKey;
-        
-        if (safeStorage.isEncryptionAvailable()) {
-          accessKeyId = safeStorage.decryptString(Buffer.from(encryptedAccessKey, 'base64'));
-          secretAccessKey = safeStorage.decryptString(Buffer.from(encryptedSecretKey, 'base64'));
+      const savedConfig = saveR2Settings({
+        endpoint: r2Config?.endpoint,
+        region: r2Config?.region,
+        bucket: r2Config?.bucket,
+        publicUrl: r2Config?.publicUrl
+      });
+
+      try {
+        const credentials = resolveCredentials();
+        if (credentials) {
+          initializeStorageService(credentials, savedConfig);
         } else {
-          // Fallback to base64 decode (less secure)
-          accessKeyId = Buffer.from(encryptedAccessKey, 'base64').toString('utf8');
-          secretAccessKey = Buffer.from(encryptedSecretKey, 'base64').toString('utf8');
+          storageService = null;
         }
-        
-        return {
-          success: true,
-          data: { accessKeyId, secretAccessKey }
-        };
+      } catch (updateError) {
+        ErrorLogger.logError(updateError, 'settings:saveR2Config:update');
       }
-      
-      // Fall back to environment variables
-      const credentials = CredentialManager.loadCredentials();
+
       return {
         success: true,
-        data: credentials
+        data: savedConfig
       };
     } catch (error) {
-      // If no stored credentials, try environment variables
-      try {
-        const credentials = CredentialManager.loadCredentials();
-        return {
-          success: true,
-          data: credentials
-        };
-      } catch (envError) {
-        // No credentials available
-        return {
-          success: true,
-          data: null
-        };
+      ErrorLogger.logError(error, 'settings:saveR2Config');
+      let userMessage = UI_TEXT.settingsSaveFailed || '保存设置失败';
+      if (error.message === 'URL is required') {
+        userMessage = UI_TEXT.endpointRequired || '请填写 S3 地址（Endpoint）';
+      } else if (error.message === 'Bucket name is required') {
+        userMessage = UI_TEXT.bucketRequired || '请填写桶名';
       }
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: userMessage
+        }
+      };
     }
   });
   
@@ -963,16 +1354,7 @@ function registerSettingsHandlers() {
       
       // Update the current storageService with new credentials
       try {
-        const config = {
-          endpoint: 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com',
-          region: 'auto',
-          bucket: 'picture',
-          accessKeyId,
-          secretAccessKey
-        };
-        
-        const r2Client = new R2Client(config);
-        storageService = new StorageService(r2Client);
+        initializeStorageService({ accessKeyId, secretAccessKey }, getR2Settings());
       } catch (updateError) {
         ErrorLogger.logError(updateError, 'settings:saveCredentials:update');
         // Still return success since credentials were saved
@@ -998,6 +1380,7 @@ function registerSettingsHandlers() {
       const store = new Store({ name: 'credentials' });
       
       store.clear();
+      storageService = null;
       
       return { success: true };
     } catch (error) {
@@ -1013,11 +1396,22 @@ function registerSettingsHandlers() {
   });
   
   // Handler for testing connection
-  ipcMain.handle('settings:testConnection', async (event, credentials) => {
+  ipcMain.handle('settings:testConnection', async (event, payload) => {
     try {
-      const { accessKeyId, secretAccessKey } = credentials;
-      
-      if (!accessKeyId || !secretAccessKey) {
+      const inputAccessKeyId = typeof payload?.accessKeyId === 'string' ? payload.accessKeyId.trim() : '';
+      const inputSecretAccessKey = typeof payload?.secretAccessKey === 'string' ? payload.secretAccessKey.trim() : '';
+
+      let credentials = null;
+      if (inputAccessKeyId && inputSecretAccessKey) {
+        credentials = {
+          accessKeyId: inputAccessKeyId,
+          secretAccessKey: inputSecretAccessKey
+        };
+      } else {
+        credentials = resolveCredentials();
+      }
+
+      if (!CredentialManager.validateCredentials(credentials)) {
         return {
           success: false,
           error: {
@@ -1026,27 +1420,24 @@ function registerSettingsHandlers() {
           }
         };
       }
-      
-      // Create a test R2Client
-      const testConfig = {
-        endpoint: 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com',
-        region: 'auto',
-        bucket: 'picture',
-        accessKeyId,
-        secretAccessKey
-      };
-      
+
+      const r2Settings = resolveR2Settings(payload || {});
+      const testConfig = buildR2Config(credentials, r2Settings);
       const testClient = new R2Client(testConfig);
-      
-      // Try to list objects (limited) to test connection
+
+      // Try to list objects to verify endpoint/credentials/bucket
       await testClient.listObjects();
-      
+
       return { success: true };
     } catch (error) {
       ErrorLogger.logError(error, 'settings:testConnection');
-      
-      const userMessage = ErrorHandler.getUserMessage(error);
-      
+      let userMessage = ErrorHandler.getUserMessage(error);
+      if (error.message === 'URL is required') {
+        userMessage = UI_TEXT.endpointRequired || '请填写 S3 地址（Endpoint）';
+      } else if (error.message === 'Bucket name is required') {
+        userMessage = UI_TEXT.bucketRequired || '请填写桶名';
+      }
+
       return {
         success: false,
         error: {
@@ -1058,23 +1449,39 @@ function registerSettingsHandlers() {
   });
   
   // Handler for listing buckets
-  ipcMain.handle('settings:listBuckets', async (event) => {
+  ipcMain.handle('settings:listBuckets', async (event, payload) => {
     try {
       // Use S3Client to list buckets
       const { S3Client, ListBucketsCommand } = require('@aws-sdk/client-s3');
-      
-      // Get current credentials
-      let credentials;
-      try {
-        const credResult = await ipcMain.invoke('settings:getCredentials');
-        credentials = credResult.data;
-      } catch {
-        credentials = CredentialManager.loadCredentials();
+
+      const inputAccessKeyId = typeof payload?.accessKeyId === 'string' ? payload.accessKeyId.trim() : '';
+      const inputSecretAccessKey = typeof payload?.secretAccessKey === 'string' ? payload.secretAccessKey.trim() : '';
+
+      let credentials = null;
+      if (inputAccessKeyId && inputSecretAccessKey) {
+        credentials = {
+          accessKeyId: inputAccessKeyId,
+          secretAccessKey: inputSecretAccessKey
+        };
+      } else {
+        credentials = resolveCredentials();
       }
-      
+
+      if (!CredentialManager.validateCredentials(credentials)) {
+        return {
+          success: false,
+          error: {
+            message: 'Missing credentials',
+            userMessage: UI_TEXT.errorAuthDetail || '请先在设置中配置 R2 凭证'
+          }
+        };
+      }
+
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+
       const client = new S3Client({
-        endpoint: 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com',
-        region: 'auto',
+        endpoint: r2Settings.endpoint,
+        region: r2Settings.region,
         credentials: {
           accessKeyId: credentials.accessKeyId,
           secretAccessKey: credentials.secretAccessKey
@@ -1092,9 +1499,34 @@ function registerSettingsHandlers() {
       return { success: true, data: buckets };
     } catch (error) {
       ErrorLogger.logError(error, 'settings:listBuckets');
-      
-      const userMessage = ErrorHandler.getUserMessage(error);
-      
+
+      const isAccessDenied =
+        error?.name === 'AccessDenied' ||
+        error?.Code === 'AccessDenied' ||
+        error?.code === 'AccessDenied' ||
+        error?.$metadata?.httpStatusCode === 403;
+
+      if (isAccessDenied) {
+        const payloadBucket = typeof payload?.bucket === 'string' ? payload.bucket.trim() : '';
+        const storedBucket = (getR2Settings().bucket || '').trim();
+        const fallbackBucket = payloadBucket || storedBucket;
+        const fallbackBuckets = fallbackBucket ? [{ name: fallbackBucket, creationDate: null }] : [];
+
+        return {
+          success: true,
+          data: fallbackBuckets,
+          warning: {
+            code: 'ACCESS_DENIED',
+            userMessage: '当前 Access Key 没有“列出存储桶”权限，已切换为手动桶名模式。请直接填写桶名，或在 Cloudflare R2 为该密钥增加 ListBuckets/All Buckets 权限。'
+          }
+        };
+      }
+
+      let userMessage = ErrorHandler.getUserMessage(error);
+      if (error.message === 'URL is required') {
+        userMessage = UI_TEXT.endpointRequired || '请填写 S3 地址（Endpoint）';
+      }
+
       return {
         success: false,
         error: {
@@ -1108,39 +1540,27 @@ function registerSettingsHandlers() {
   // Handler for getting current bucket
   ipcMain.handle('settings:getCurrentBucket', async (event) => {
     try {
-      const Store = require('electron-store');
-      const store = new Store({ name: 'settings' });
-      
-      const bucket = store.get('currentBucket', 'picture');
-      
+      const bucket = getR2Settings().bucket;
       return { success: true, data: bucket };
     } catch (error) {
       // Return default bucket
-      return { success: true, data: 'picture' };
+      return { success: true, data: DEFAULT_R2_BUCKET };
     }
   });
   
   // Handler for setting current bucket
   ipcMain.handle('settings:setCurrentBucket', async (event, bucket) => {
     try {
-      const Store = require('electron-store');
-      const store = new Store({ name: 'settings' });
-      
-      store.set('currentBucket', bucket);
+      const savedConfig = saveR2Settings({ bucket });
       
       // Update the current storageService with new bucket
       try {
-        const credentials = CredentialManager.loadCredentials();
-        const config = {
-          endpoint: 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com',
-          region: 'auto',
-          bucket: bucket,
-          accessKeyId: credentials.accessKeyId,
-          secretAccessKey: credentials.secretAccessKey
-        };
-        
-        const r2Client = new R2Client(config);
-        storageService = new StorageService(r2Client);
+        const credentials = resolveCredentials();
+        if (credentials) {
+          initializeStorageService(credentials, savedConfig);
+        } else {
+          storageService = null;
+        }
       } catch (updateError) {
         ErrorLogger.logError(updateError, 'settings:setCurrentBucket:update');
       }

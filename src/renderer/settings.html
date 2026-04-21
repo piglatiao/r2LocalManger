@@ -457,10 +457,17 @@
         <div class="settings-section">
           <h2 class="settings-section-title" data-i18n="bucketTitle">存储桶选择</h2>
           <p class="settings-section-description" data-i18n="bucketDescription">选择要管理的 R2 存储桶。</p>
-          
-          <!-- Current bucket -->
+
+          <!-- Bucket name -->
           <div class="form-group">
-            <label class="form-label" data-i18n="bucketCurrent">当前存储桶</label>
+            <label class="form-label" for="bucket-name" data-i18n="bucketCurrent">当前存储桶</label>
+            <input type="text" id="bucket-name" class="form-input" placeholder="例如: picture">
+            <p class="help-text" data-i18n="bucketManualHint">可手动填写桶名，也可通过下方“刷新”后选择。</p>
+          </div>
+          
+          <!-- Bucket quick select -->
+          <div class="form-group">
+            <label class="form-label" data-i18n="bucketSelectPlaceholder">请选择存储桶</label>
             <div class="input-group">
               <select id="bucket-select" class="form-select">
                 <option value="" data-i18n="bucketSelectPlaceholder">请选择存储桶</option>
@@ -492,14 +499,20 @@
           
           <div class="form-group">
             <label class="form-label" for="endpoint-url" data-i18n="endpointUrl">端点 URL</label>
-            <input type="text" id="endpoint-url" class="form-input" value="https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com" readonly>
-            <p class="help-text">此为只读配置，由应用程序自动管理</p>
+            <input type="text" id="endpoint-url" class="form-input" value="https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com" placeholder="https://<accountid>.r2.cloudflarestorage.com">
+            <p class="help-text" data-i18n="endpointHelp">支持输入完整 URL；未填写协议时默认使用 https://</p>
           </div>
           
           <div class="form-group">
             <label class="form-label" for="endpoint-region" data-i18n="endpointRegion">区域</label>
-            <input type="text" id="endpoint-region" class="form-input" value="auto" readonly>
+            <input type="text" id="endpoint-region" class="form-input" value="auto">
             <p class="help-text">R2 使用 "auto" 作为区域</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="public-url" data-i18n="publicUrl">自定义域名</label>
+            <input type="text" id="public-url" class="form-input" value="" placeholder="https://cdn.example.com">
+            <p class="help-text" data-i18n="publicUrlHelp">可选。用于生成文件访问链接；不填写时使用 S3 地址。</p>
           </div>
         </div>
       </div>

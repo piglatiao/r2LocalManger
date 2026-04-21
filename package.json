@@ -6,7 +6,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "build": "electron-builder --dir",
+    "build": "electron-builder --dir --publish never -c.npmRebuild=false",
+    "build:full": "electron-builder --dir",
     "package:win": "electron-builder --win --x64",
     "test": "jest"
   },
