@@ -55,6 +55,18 @@ const electronAPI = {
   listBuckets: async (payload) => {
     return await ipcRenderer.invoke('settings:listBuckets', payload);
   },
+
+  createBucket: async (payload) => {
+    return await ipcRenderer.invoke('settings:createBucket', payload);
+  },
+
+  updateBucket: async (payload) => {
+    return await ipcRenderer.invoke('settings:updateBucket', payload);
+  },
+
+  deleteBucket: async (payload) => {
+    return await ipcRenderer.invoke('settings:deleteBucket', payload);
+  },
   
   getCurrentBucket: async () => {
     return await ipcRenderer.invoke('settings:getCurrentBucket');
@@ -98,9 +110,19 @@ const elements = {
   bucketList: document.getElementById('bucket-list'),
   bucketLoading: document.getElementById('bucket-loading'),
   bucketName: document.getElementById('bucket-name'),
+  btnCreateBucket: document.getElementById('btn-create-bucket'),
+  btnUpdateBucket: document.getElementById('btn-update-bucket'),
+  btnDeleteBucket: document.getElementById('btn-delete-bucket'),
+  newBucketName: document.getElementById('new-bucket-name'),
+  newBucketLocationHint: document.getElementById('new-bucket-location-hint'),
+  newBucketStorageClass: document.getElementById('new-bucket-storage-class'),
+  editBucketStorageClass: document.getElementById('edit-bucket-storage-class'),
   endpointUrl: document.getElementById('endpoint-url'),
   endpointRegion: document.getElementById('endpoint-region'),
   publicUrl: document.getElementById('public-url'),
+  cloudflareAccountId: document.getElementById('cloudflare-account-id'),
+  cloudflareApiToken: document.getElementById('cloudflare-api-token'),
+  cloudflareJurisdiction: document.getElementById('cloudflare-jurisdiction'),
   
   // Footer buttons
   btnCancel: document.getElementById('btn-cancel'),
@@ -120,7 +142,10 @@ const state = {
     endpoint: '',
     region: 'auto',
     bucket: '',
-    publicUrl: ''
+    publicUrl: '',
+    cloudflareAccountId: '',
+    cloudflareApiToken: '',
+    cloudflareJurisdiction: 'default'
   },
   buckets: [],
   hasChanges: false,
@@ -208,6 +233,12 @@ function bindEvents() {
   if (elements.endpointUrl) elements.endpointUrl.addEventListener('input', handleR2ConfigInput);
   if (elements.endpointRegion) elements.endpointRegion.addEventListener('input', handleR2ConfigInput);
   if (elements.publicUrl) elements.publicUrl.addEventListener('input', handleR2ConfigInput);
+  if (elements.cloudflareAccountId) elements.cloudflareAccountId.addEventListener('input', handleR2ConfigInput);
+  if (elements.cloudflareApiToken) elements.cloudflareApiToken.addEventListener('input', handleR2ConfigInput);
+  if (elements.cloudflareJurisdiction) elements.cloudflareJurisdiction.addEventListener('change', handleR2ConfigInput);
+  if (elements.btnCreateBucket) elements.btnCreateBucket.addEventListener('click', handleCreateBucket);
+  if (elements.btnUpdateBucket) elements.btnUpdateBucket.addEventListener('click', handleUpdateBucket);
+  if (elements.btnDeleteBucket) elements.btnDeleteBucket.addEventListener('click', handleDeleteBucket);
   
   // Footer buttons
   if (elements.btnCancel) elements.btnCancel.addEventListener('click', handleCancel);
@@ -219,7 +250,7 @@ function bindEvents() {
  */
 async function loadSettings() {
   try {
-    // 加载凭证
+    // Load credentials
     const credResult = await electronAPI.getCredentials();
     if (credResult.success && credResult.data) {
       state.credentials = credResult.data;
@@ -230,36 +261,46 @@ async function loadSettings() {
       updateCredentialStatus(false);
     }
 
-    // 加载 R2 配置
+    // Load R2 + Cloudflare API config
     const r2ConfigResult = await electronAPI.getR2Config();
     if (r2ConfigResult.success && r2ConfigResult.data) {
       state.r2Config = {
         endpoint: r2ConfigResult.data.endpoint || '',
         region: r2ConfigResult.data.region || 'auto',
         bucket: r2ConfigResult.data.bucket || '',
-        publicUrl: r2ConfigResult.data.publicUrl || ''
+        publicUrl: r2ConfigResult.data.publicUrl || '',
+        cloudflareAccountId: r2ConfigResult.data.cloudflareAccountId || '',
+        cloudflareApiToken: r2ConfigResult.data.cloudflareApiToken || '',
+        cloudflareJurisdiction: r2ConfigResult.data.cloudflareJurisdiction || 'default'
       };
     } else {
       state.r2Config = {
         endpoint: '',
         region: 'auto',
         bucket: '',
-        publicUrl: ''
+        publicUrl: '',
+        cloudflareAccountId: '',
+        cloudflareApiToken: '',
+        cloudflareJurisdiction: 'default'
       };
     }
 
     if (elements.endpointUrl) elements.endpointUrl.value = state.r2Config.endpoint;
     if (elements.endpointRegion) elements.endpointRegion.value = state.r2Config.region;
     if (elements.publicUrl) elements.publicUrl.value = state.r2Config.publicUrl;
+    if (elements.cloudflareAccountId) elements.cloudflareAccountId.value = state.r2Config.cloudflareAccountId;
+    if (elements.cloudflareApiToken) elements.cloudflareApiToken.value = state.r2Config.cloudflareApiToken;
+    if (elements.cloudflareJurisdiction) {
+      elements.cloudflareJurisdiction.value = state.r2Config.cloudflareJurisdiction || 'default';
+    }
     if (elements.bucketName) {
       elements.bucketName.value = state.r2Config.bucket;
     } else if (elements.bucketSelect) {
       elements.bucketSelect.value = state.r2Config.bucket;
     }
-    
-    // 加载存储桶列表
+
+    // Load bucket list
     await loadBucketList();
-    
   } catch (error) {
     console.error('加载设置失败:', error);
     showNotification(UI_TEXT.credentialsLoadFailed || '加载设置失败', 'error');
@@ -267,7 +308,7 @@ async function loadSettings() {
 }
 
 /**
- * 处理 Tab 点击
+ * 处理 Tab 点击 点击
  */
 function handleTabClick(tabItem) {
   const tabId = tabItem.dataset.tab;
@@ -438,7 +479,10 @@ async function loadBucketList() {
     const bucketRequestPayload = {
       endpoint: getInputValue(elements.endpointUrl),
       region: getInputValue(elements.endpointRegion),
-      bucket: getInputValue(elements.bucketName) || getInputValue(elements.bucketSelect)
+      bucket: getInputValue(elements.bucketName) || getInputValue(elements.bucketSelect),
+      cloudflareAccountId: getInputValue(elements.cloudflareAccountId),
+      cloudflareApiToken: getInputValue(elements.cloudflareApiToken),
+      cloudflareJurisdiction: getInputValue(elements.cloudflareJurisdiction, 'default') || 'default'
     };
 
     // 两个字段都填写时，使用表单中的凭证测试；否则由主进程回退到已保存凭证
@@ -476,6 +520,9 @@ function handleR2ConfigInput() {
   state.r2Config.region = getInputValue(elements.endpointRegion, 'auto') || 'auto';
   state.r2Config.bucket = getInputValue(elements.bucketName);
   state.r2Config.publicUrl = getInputValue(elements.publicUrl);
+  state.r2Config.cloudflareAccountId = getInputValue(elements.cloudflareAccountId);
+  state.r2Config.cloudflareApiToken = getInputValue(elements.cloudflareApiToken);
+  state.r2Config.cloudflareJurisdiction = getInputValue(elements.cloudflareJurisdiction, 'default') || 'default';
   state.hasChanges = true;
 }
 
@@ -537,6 +584,110 @@ async function handleRefreshBuckets() {
   await loadBucketList();
 }
 
+function getSettingsPayload() {
+  return {
+    endpoint: getInputValue(elements.endpointUrl),
+    region: getInputValue(elements.endpointRegion, 'auto') || 'auto',
+    bucket: getInputValue(elements.bucketName) || getInputValue(elements.bucketSelect),
+    publicUrl: getInputValue(elements.publicUrl),
+    cloudflareAccountId: getInputValue(elements.cloudflareAccountId),
+    cloudflareApiToken: getInputValue(elements.cloudflareApiToken),
+    cloudflareJurisdiction: getInputValue(elements.cloudflareJurisdiction, 'default') || 'default'
+  };
+}
+
+async function handleCreateBucket() {
+  const name = getInputValue(elements.newBucketName).toLowerCase();
+  const locationHint = getInputValue(elements.newBucketLocationHint);
+  const storageClass = getInputValue(elements.newBucketStorageClass, 'Standard') || 'Standard';
+
+  if (!name) {
+    showNotification('Please input a bucket name to create', 'error');
+    return;
+  }
+
+  const result = await electronAPI.createBucket({
+    ...getSettingsPayload(),
+    name,
+    locationHint,
+    storageClass
+  });
+
+  if (!result.success) {
+    showNotification(result.error?.userMessage || 'Create bucket failed', 'error');
+    return;
+  }
+
+  if (elements.newBucketName) elements.newBucketName.value = '';
+  if (elements.bucketName) elements.bucketName.value = name;
+  state.r2Config.bucket = name;
+  state.hasChanges = true;
+  showNotification(`Bucket "${name}" created`, 'success');
+  await loadBucketList();
+}
+
+async function handleUpdateBucket() {
+  const bucketName = getInputValue(elements.bucketName) || getInputValue(elements.bucketSelect);
+  const storageClass = getInputValue(elements.editBucketStorageClass, 'Standard') || 'Standard';
+
+  if (!bucketName) {
+    showNotification('Please select or input a bucket name to update', 'error');
+    return;
+  }
+
+  const result = await electronAPI.updateBucket({
+    ...getSettingsPayload(),
+    bucketName,
+    storageClass
+  });
+
+  if (!result.success) {
+    showNotification(result.error?.userMessage || 'Update bucket failed', 'error');
+    return;
+  }
+
+  showNotification(`Bucket "${bucketName}" updated to ${storageClass}`, 'success');
+  await loadBucketList();
+}
+
+async function handleDeleteBucket() {
+  const bucketName = getInputValue(elements.bucketName) || getInputValue(elements.bucketSelect);
+  if (!bucketName) {
+    showNotification('Please select or input a bucket name to delete', 'error');
+    return;
+  }
+
+  const confirmed = await electronAPI.confirm(
+    `Delete bucket "${bucketName}"? Objects in this bucket will be deleted first. This action cannot be undone.`
+  );
+  if (!confirmed) return;
+
+  const accessKeyId = getInputValue(elements.accessKeyId);
+  const secretAccessKey = getInputValue(elements.secretAccessKey);
+  const payload = {
+    ...getSettingsPayload(),
+    bucketName
+  };
+  if (accessKeyId && secretAccessKey) {
+    payload.accessKeyId = accessKeyId;
+    payload.secretAccessKey = secretAccessKey;
+  }
+
+  const result = await electronAPI.deleteBucket(payload);
+  if (!result.success) {
+    showNotification(result.error?.userMessage || 'Delete bucket failed', 'error');
+    return;
+  }
+
+  const deletedObjects = Number(result.data?.deletedObjects || 0);
+  showNotification(`Bucket "${bucketName}" deleted. Cleared ${deletedObjects} objects.`, 'success');
+
+  if (elements.bucketName) elements.bucketName.value = '';
+  state.r2Config.bucket = '';
+  state.hasChanges = true;
+  await loadBucketList();
+}
+
 /**
  * 处理取消
  */
@@ -554,51 +705,51 @@ async function handleSave() {
   const region = getInputValue(elements.endpointRegion, 'auto') || 'auto';
   const bucket = getInputValue(elements.bucketName) || getInputValue(elements.bucketSelect);
   const publicUrl = getInputValue(elements.publicUrl);
-  
-  // 检查是否有更改
+  const cloudflareAccountId = getInputValue(elements.cloudflareAccountId);
+  const cloudflareApiToken = getInputValue(elements.cloudflareApiToken);
+  const cloudflareJurisdiction = getInputValue(elements.cloudflareJurisdiction, 'default') || 'default';
+
   if (!state.hasChanges) {
-    showNotification(UI_TEXT.settingsNoChanges || '没有需要保存的更改', 'info');
+    showNotification(UI_TEXT.settingsNoChanges || 'No changes to save', 'info');
     return;
   }
 
-  // 验证 R2 配置
   if (!endpoint) {
-    showNotification(UI_TEXT.endpointRequired || '请填写 S3 地址（Endpoint）', 'error');
+    showNotification(UI_TEXT.endpointRequired || 'Please input S3 endpoint', 'error');
     return;
   }
 
   if (!bucket) {
-    showNotification(UI_TEXT.bucketRequired || '请填写桶名', 'error');
+    showNotification(UI_TEXT.bucketRequired || 'Please input bucket name', 'error');
     return;
   }
 
-  // 凭证校验：如果填写了其中一项，必须两项都填
   if ((accessKeyId && !secretAccessKey) || (!accessKeyId && secretAccessKey)) {
-    showNotification(UI_TEXT.credentialsValidateFailed || '请输入完整的凭证信息', 'error');
+    showNotification(UI_TEXT.credentialsValidateFailed || 'Please input complete credentials', 'error');
     return;
   }
-  
-  // 保存按钮状态
+
   if (elements.btnSave) {
     elements.btnSave.disabled = true;
-    elements.btnSave.innerHTML = `<span class="loading-spinner"></span><span>${UI_TEXT.settingsSaving || '正在保存...'}</span>`;
+    elements.btnSave.innerHTML = `<span class="loading-spinner"></span><span>${UI_TEXT.settingsSaving || 'Saving...'}</span>`;
   }
-  
+
   try {
-    // 保存 R2 配置
     const r2ConfigResult = await electronAPI.saveR2Config({
       endpoint,
       region,
       bucket,
-      publicUrl
+      publicUrl,
+      cloudflareAccountId,
+      cloudflareApiToken,
+      cloudflareJurisdiction
     });
 
     if (!r2ConfigResult.success) {
-      showNotification(r2ConfigResult.error?.userMessage || UI_TEXT.settingsSaveFailed || '保存设置失败', 'error');
+      showNotification(r2ConfigResult.error?.userMessage || UI_TEXT.settingsSaveFailed || 'Save settings failed', 'error');
       return;
     }
 
-    // 如果凭证已填写，则一并保存
     if (accessKeyId && secretAccessKey) {
       const credResult = await electronAPI.saveCredentials({
         accessKeyId,
@@ -607,32 +758,33 @@ async function handleSave() {
       });
 
       if (!credResult.success) {
-        showNotification(credResult.error?.userMessage || UI_TEXT.credentialsSaveFailed || '凭证保存失败', 'error');
+        showNotification(credResult.error?.userMessage || UI_TEXT.credentialsSaveFailed || 'Save credentials failed', 'error');
         return;
       }
     }
 
     state.r2Config = {
-      endpoint: endpoint,
-      region: region,
-      bucket: bucket,
-      publicUrl: publicUrl
+      endpoint,
+      region,
+      bucket,
+      publicUrl,
+      cloudflareAccountId,
+      cloudflareApiToken,
+      cloudflareJurisdiction
     };
-    showNotification(UI_TEXT.settingsSaveSuccess || '设置已保存', 'success');
     state.hasChanges = false;
-    
-    // 延迟关闭窗口
+    showNotification(UI_TEXT.settingsSaveSuccess || 'Settings saved', 'success');
+
     setTimeout(() => {
       closeSettingsPage({ reload: true });
     }, 1000);
-    
   } catch (error) {
-    console.error('保存设置失败:', error);
-    showNotification(UI_TEXT.settingsSaveFailed || '保存设置失败', 'error');
+    console.error('Save settings failed:', error);
+    showNotification(UI_TEXT.settingsSaveFailed || 'Save settings failed', 'error');
   } finally {
     if (elements.btnSave) {
       elements.btnSave.disabled = false;
-      elements.btnSave.innerHTML = `<span>${UI_TEXT.settingsButtonSave || '保存设置'}</span>`;
+      elements.btnSave.innerHTML = `<span>${UI_TEXT.settingsButtonSave || 'Save Settings'}</span>`;
     }
   }
 }
@@ -648,10 +800,9 @@ function showNotification(message, type = 'info') {
   const notification = document.createElement('div');
   notification.className = `notification ${type}`;
   notification.textContent = message;
-  
+
   elements.notificationContainer.appendChild(notification);
-  
-  // 3秒后自动移除
+
   setTimeout(() => {
     notification.style.animation = 'slideIn 0.3s ease reverse';
     setTimeout(() => {
@@ -660,16 +811,14 @@ function showNotification(message, type = 'info') {
   }, 3000);
 }
 
-// 初始化应用
 async function bootstrapSettings() {
   try {
     await init();
   } catch (error) {
-    console.error('设置窗口初始化失败:', error);
-    showNotification((UI_TEXT.settingsLoadFailed || UI_TEXT.errorUnknown || '设置窗口初始化失败') + `: ${error.message}`, 'error');
-    // 兜底提示，避免“点击无反应”但界面无任何反馈
+    console.error('Settings bootstrap failed:', error);
+    showNotification((UI_TEXT.settingsLoadFailed || UI_TEXT.errorUnknown || 'Settings bootstrap failed') + `: ${error.message}`, 'error');
     try {
-      window.alert(`设置窗口初始化失败: ${error.message}`);
+      window.alert(`Settings bootstrap failed: ${error.message}`);
     } catch {
       // ignore
     }

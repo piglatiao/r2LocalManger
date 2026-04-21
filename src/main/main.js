@@ -26,6 +26,9 @@ const DEFAULT_R2_ENDPOINT = 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudfl
 const DEFAULT_R2_REGION = 'auto';
 const DEFAULT_R2_BUCKET = 'picture';
 const DEFAULT_R2_PUBLIC_URL = '';
+const DEFAULT_CF_ACCOUNT_ID = '';
+const DEFAULT_CF_API_TOKEN = '';
+const DEFAULT_CF_R2_JURISDICTION = 'default';
 const STARTUP_CHECK_TIMEOUT_MS = 10000;
 
 const StartupCheckStatus = {
@@ -63,6 +66,263 @@ function normalizeUrl(rawUrl, options = {}) {
 }
 
 /**
+ * Guess Cloudflare account id from R2 endpoint hostname.
+ * Example: https://<account_id>.r2.cloudflarestorage.com
+ * @param {string} endpoint
+ * @returns {string}
+ */
+function inferAccountIdFromEndpoint(endpoint) {
+  try {
+    const hostname = new URL(endpoint).hostname || '';
+    const firstLabel = hostname.split('.')[0] || '';
+    if (/^[a-z0-9]{16,64}$/i.test(firstLabel)) {
+      return firstLabel;
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Normalize Cloudflare jurisdiction header value.
+ * @param {string} raw
+ * @returns {'default'|'eu'|'fedramp'}
+ */
+function normalizeJurisdiction(raw) {
+  const normalized = String(raw || DEFAULT_CF_R2_JURISDICTION).trim().toLowerCase();
+  if (['default', 'eu', 'fedramp'].includes(normalized)) {
+    return normalized;
+  }
+  return DEFAULT_CF_R2_JURISDICTION;
+}
+
+/**
+ * Build Cloudflare API auth config from settings/env.
+ * @param {Object} settings
+ * @returns {{accountId: string, apiToken: string, jurisdiction: string}}
+ */
+function resolveCloudflareApiConfig(settings = {}) {
+  const accountId =
+    String(
+      settings.cloudflareAccountId ||
+      process.env.CF_ACCOUNT_ID ||
+      process.env.CLOUDFLARE_ACCOUNT_ID ||
+      ''
+    ).trim() || inferAccountIdFromEndpoint(settings.endpoint || '');
+
+  const apiToken = String(
+    settings.cloudflareApiToken ||
+    process.env.CF_API_TOKEN ||
+    process.env.CLOUDFLARE_API_TOKEN ||
+    ''
+  ).trim();
+
+  const jurisdiction = normalizeJurisdiction(
+    settings.cloudflareJurisdiction || process.env.CF_R2_JURISDICTION
+  );
+
+  return { accountId, apiToken, jurisdiction };
+}
+
+/**
+ * Call Cloudflare R2 management API.
+ * @param {Object} params
+ * @param {string} params.method
+ * @param {string} params.accountId
+ * @param {string} params.apiToken
+ * @param {string} params.path
+ * @param {Object} [params.body]
+ * @param {string} [params.jurisdiction]
+ * @param {Object} [params.extraHeaders]
+ * @returns {Promise<any>}
+ */
+async function callCloudflareR2Api(params) {
+  const {
+    method,
+    accountId,
+    apiToken,
+    path: apiPath,
+    body,
+    jurisdiction = DEFAULT_CF_R2_JURISDICTION,
+    extraHeaders = {}
+  } = params;
+
+  if (!accountId) {
+    const error = new Error('Cloudflare account id is required');
+    error.userMessage = '缺少 Cloudflare Account ID，请在设置中填写后再试。';
+    throw error;
+  }
+
+  if (!apiToken) {
+    const error = new Error('Cloudflare API token is required');
+    error.userMessage = '缺少 Cloudflare API Token，请在设置中填写后再试。';
+    throw error;
+  }
+
+  if (typeof fetch !== 'function') {
+    const error = new Error('Fetch API is unavailable');
+    error.userMessage = '当前运行环境不支持 Cloudflare API 调用，请更新运行环境。';
+    throw error;
+  }
+
+  const headers = {
+    Authorization: `Bearer ${apiToken}`,
+    ...extraHeaders
+  };
+
+  if (jurisdiction && jurisdiction !== 'default') {
+    headers['cf-r2-jurisdiction'] = jurisdiction;
+  }
+
+  let payload = undefined;
+  if (body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    payload = JSON.stringify(body);
+  }
+
+  const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}${apiPath}`;
+  const response = await fetch(url, {
+    method,
+    headers,
+    body: payload
+  });
+
+  const responseText = await response.text();
+  let data = null;
+  try {
+    data = responseText ? JSON.parse(responseText) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok || (data && data.success === false)) {
+    const firstError = Array.isArray(data?.errors) ? data.errors[0] : null;
+    const detailMessage =
+      firstError?.message ||
+      firstError?.code ||
+      data?.messages?.[0]?.message ||
+      `HTTP ${response.status}`;
+
+    const error = new Error(`Cloudflare R2 API failed: ${detailMessage}`);
+    error.status = response.status;
+    error.code = firstError?.code || response.status;
+    if (response.status === 401 || response.status === 403) {
+      error.userMessage = 'Cloudflare API Token 无权限或已失效，请检查 Token 的 R2 管理权限。';
+    } else {
+      error.userMessage = `Cloudflare API 调用失败：${detailMessage}`;
+    }
+    throw error;
+  }
+
+  return data?.result ?? data;
+}
+
+/**
+ * List buckets through Cloudflare management API.
+ * @param {{accountId: string, apiToken: string, jurisdiction: string}} apiConfig
+ * @returns {Promise<Array<{name: string, creationDate: string|null, locationHint?: string, storageClass?: string}>>}
+ */
+async function listBucketsViaCloudflareApi(apiConfig) {
+  const result = await callCloudflareR2Api({
+    method: 'GET',
+    accountId: apiConfig.accountId,
+    apiToken: apiConfig.apiToken,
+    jurisdiction: apiConfig.jurisdiction,
+    path: '/r2/buckets?per_page=1000'
+  });
+
+  const bucketsRaw = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.buckets)
+      ? result.buckets
+      : [];
+
+  return bucketsRaw
+    .map(item => ({
+      name: item?.name || '',
+      creationDate: item?.creation_date || item?.creationDate || null,
+      locationHint: item?.locationHint || item?.location || '',
+      storageClass: item?.storageClass || item?.storage_class || ''
+    }))
+    .filter(item => item.name);
+}
+
+/**
+ * Delete all objects from a bucket via S3 API before bucket deletion.
+ * @param {Object} params
+ * @param {string} params.endpoint
+ * @param {string} params.region
+ * @param {string} params.bucket
+ * @param {string} params.accessKeyId
+ * @param {string} params.secretAccessKey
+ * @returns {Promise<number>} deleted object count
+ */
+async function clearBucketObjectsViaS3(params) {
+  const {
+    endpoint,
+    region,
+    bucket,
+    accessKeyId,
+    secretAccessKey
+  } = params;
+
+  const {
+    S3Client,
+    ListObjectsV2Command,
+    DeleteObjectsCommand
+  } = require('@aws-sdk/client-s3');
+
+  const client = new S3Client({
+    endpoint,
+    region,
+    credentials: {
+      accessKeyId,
+      secretAccessKey
+    }
+  });
+
+  let deletedCount = 0;
+  let continuationToken = undefined;
+
+  while (true) {
+    const listResponse = await client.send(new ListObjectsV2Command({
+      Bucket: bucket,
+      ContinuationToken: continuationToken,
+      MaxKeys: 1000
+    }));
+
+    const objects = Array.isArray(listResponse?.Contents) ? listResponse.Contents : [];
+    const keys = objects.map(item => item?.Key).filter(Boolean);
+
+    if (keys.length > 0) {
+      const deleteResponse = await client.send(new DeleteObjectsCommand({
+        Bucket: bucket,
+        Delete: {
+          Objects: keys.map(key => ({ Key: key })),
+          Quiet: true
+        }
+      }));
+
+      const errors = Array.isArray(deleteResponse?.Errors) ? deleteResponse.Errors : [];
+      if (errors.length > 0) {
+        const firstError = errors[0];
+        throw new Error(`Failed to clear bucket objects: ${firstError?.Code || ''} ${firstError?.Message || ''}`.trim());
+      }
+
+      deletedCount += keys.length;
+    }
+
+    if (!listResponse?.IsTruncated || !listResponse?.NextContinuationToken) {
+      break;
+    }
+    continuationToken = listResponse.NextContinuationToken;
+  }
+
+  return deletedCount;
+}
+
+/**
  * 获取并标准化 R2 配置（endpoint/region/bucket/publicUrl）
  * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}}
  */
@@ -75,6 +335,18 @@ function getR2Settings() {
     const regionRaw = store.get('r2Region', process.env.R2_REGION || DEFAULT_R2_REGION);
     const bucketRaw = store.get('currentBucket', process.env.R2_BUCKET || DEFAULT_R2_BUCKET);
     const publicUrlRaw = store.get('r2PublicUrl', process.env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_URL);
+    const cfAccountIdRaw = store.get(
+      'cfAccountId',
+      process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID || DEFAULT_CF_ACCOUNT_ID
+    );
+    const cfApiTokenRaw = store.get(
+      'cfApiToken',
+      process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || DEFAULT_CF_API_TOKEN
+    );
+    const cfJurisdictionRaw = store.get(
+      'cfR2Jurisdiction',
+      process.env.CF_R2_JURISDICTION || DEFAULT_CF_R2_JURISDICTION
+    );
 
     let endpoint;
     let publicUrl;
@@ -92,19 +364,28 @@ function getR2Settings() {
 
     const region = String(regionRaw || DEFAULT_R2_REGION).trim() || DEFAULT_R2_REGION;
     const bucket = String(bucketRaw || DEFAULT_R2_BUCKET).trim() || DEFAULT_R2_BUCKET;
+    const cloudflareAccountId = String(cfAccountIdRaw || '').trim() || inferAccountIdFromEndpoint(endpoint);
+    const cloudflareApiToken = String(cfApiTokenRaw || '').trim();
+    const cloudflareJurisdiction = normalizeJurisdiction(cfJurisdictionRaw);
 
     return {
       endpoint,
       region,
       bucket,
-      publicUrl
+      publicUrl,
+      cloudflareAccountId,
+      cloudflareApiToken,
+      cloudflareJurisdiction
     };
   } catch {
     return {
       endpoint: DEFAULT_R2_ENDPOINT,
       region: DEFAULT_R2_REGION,
       bucket: DEFAULT_R2_BUCKET,
-      publicUrl: DEFAULT_R2_PUBLIC_URL
+      publicUrl: DEFAULT_R2_PUBLIC_URL,
+      cloudflareAccountId: DEFAULT_CF_ACCOUNT_ID,
+      cloudflareApiToken: DEFAULT_CF_API_TOKEN,
+      cloudflareJurisdiction: DEFAULT_CF_R2_JURISDICTION
     };
   }
 }
@@ -122,7 +403,13 @@ function resolveR2Settings(input = {}, options = {}) {
     endpoint: typeof input.endpoint === 'string' ? input.endpoint : base.endpoint,
     region: typeof input.region === 'string' ? input.region : base.region,
     bucket: typeof input.bucket === 'string' ? input.bucket : base.bucket,
-    publicUrl: typeof input.publicUrl === 'string' ? input.publicUrl : base.publicUrl
+    publicUrl: typeof input.publicUrl === 'string' ? input.publicUrl : base.publicUrl,
+    cloudflareAccountId:
+      typeof input.cloudflareAccountId === 'string' ? input.cloudflareAccountId : base.cloudflareAccountId,
+    cloudflareApiToken:
+      typeof input.cloudflareApiToken === 'string' ? input.cloudflareApiToken : base.cloudflareApiToken,
+    cloudflareJurisdiction:
+      typeof input.cloudflareJurisdiction === 'string' ? input.cloudflareJurisdiction : base.cloudflareJurisdiction
   };
 
   const endpoint = normalizeUrl(merged.endpoint);
@@ -138,7 +425,10 @@ function resolveR2Settings(input = {}, options = {}) {
     endpoint,
     region,
     bucket,
-    publicUrl
+    publicUrl,
+    cloudflareAccountId: String(merged.cloudflareAccountId || '').trim() || inferAccountIdFromEndpoint(endpoint),
+    cloudflareApiToken: String(merged.cloudflareApiToken || '').trim(),
+    cloudflareJurisdiction: normalizeJurisdiction(merged.cloudflareJurisdiction)
   };
 }
 
@@ -156,6 +446,9 @@ function saveR2Settings(input = {}) {
   store.set('r2Region', settings.region);
   store.set('currentBucket', settings.bucket);
   store.set('r2PublicUrl', settings.publicUrl);
+  store.set('cfAccountId', settings.cloudflareAccountId || '');
+  store.set('cfApiToken', settings.cloudflareApiToken || '');
+  store.set('cfR2Jurisdiction', settings.cloudflareJurisdiction || DEFAULT_CF_R2_JURISDICTION);
 
   return settings;
 }
@@ -1272,7 +1565,10 @@ function registerSettingsHandlers() {
         endpoint: r2Config?.endpoint,
         region: r2Config?.region,
         bucket: r2Config?.bucket,
-        publicUrl: r2Config?.publicUrl
+        publicUrl: r2Config?.publicUrl,
+        cloudflareAccountId: r2Config?.cloudflareAccountId,
+        cloudflareApiToken: r2Config?.cloudflareApiToken,
+        cloudflareJurisdiction: r2Config?.cloudflareJurisdiction
       });
 
       try {
@@ -1507,6 +1803,32 @@ function registerSettingsHandlers() {
         error?.$metadata?.httpStatusCode === 403;
 
       if (isAccessDenied) {
+        const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+        const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+
+        if (cfApiConfig.accountId && cfApiConfig.apiToken) {
+          try {
+            const buckets = await listBucketsViaCloudflareApi(cfApiConfig);
+            return {
+              success: true,
+              data: buckets,
+              warning: {
+                code: 'LIST_FALLBACK_CLOUDFLARE_API',
+                userMessage: 'S3 密钥没有列桶权限，已自动使用 Cloudflare 管理 API 获取存储桶列表。'
+              }
+            };
+          } catch (cfError) {
+            ErrorLogger.logError(cfError, 'settings:listBuckets:cloudflareApiFallback');
+            return {
+              success: false,
+              error: {
+                message: cfError.message,
+                userMessage: cfError.userMessage || 'S3 列桶权限不足，且 Cloudflare API 获取失败，请检查 Account ID 与 API Token。'
+              }
+            };
+          }
+        }
+
         const payloadBucket = typeof payload?.bucket === 'string' ? payload.bucket.trim() : '';
         const storedBucket = (getR2Settings().bucket || '').trim();
         const fallbackBucket = payloadBucket || storedBucket;
@@ -1517,7 +1839,7 @@ function registerSettingsHandlers() {
           data: fallbackBuckets,
           warning: {
             code: 'ACCESS_DENIED',
-            userMessage: '当前 Access Key 没有“列出存储桶”权限，已切换为手动桶名模式。请直接填写桶名，或在 Cloudflare R2 为该密钥增加 ListBuckets/All Buckets 权限。'
+            userMessage: '当前 Access Key 没有列桶权限，已切换为手动桶名模式。可配置 Cloudflare Account ID 与 API Token 来获取完整桶列表。'
           }
         };
       }
@@ -1573,6 +1895,214 @@ function registerSettingsHandlers() {
         error: {
           message: error.message,
           userMessage: UI_TEXT.bucketSwitchFailed || '切换存储桶失败'
+        }
+      };
+    }
+  });
+
+  // Handler for creating a bucket
+  ipcMain.handle('settings:createBucket', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+
+      const bucketName = String(payload?.name || '').trim();
+      const storageClass = String(payload?.storageClass || 'Standard').trim() || 'Standard';
+      const locationHintRaw = String(payload?.locationHint || '').trim();
+
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+      if (!/^[a-z0-9-]{3,64}$/.test(bucketName)) {
+        return {
+          success: false,
+          error: {
+            message: 'Invalid bucket name',
+            userMessage: '桶名必须为 3-64 位，只允许小写字母、数字和连字符。'
+          }
+        };
+      }
+
+      const body = {
+        name: bucketName,
+        storageClass
+      };
+      if (locationHintRaw) {
+        body.locationHint = locationHintRaw;
+      }
+
+      const result = await callCloudflareR2Api({
+        method: 'POST',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: '/r2/buckets',
+        body
+      });
+
+      return {
+        success: true,
+        data: result
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:createBucket');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '创建存储桶失败，请检查 Cloudflare API 配置。'
+        }
+      };
+    }
+  });
+
+  // Handler for updating bucket storage class
+  ipcMain.handle('settings:updateBucket', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+
+      const bucketName = String(payload?.bucketName || '').trim();
+      const storageClass = String(payload?.storageClass || '').trim();
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+      if (!/^[a-z0-9-]{3,64}$/.test(bucketName)) {
+        return {
+          success: false,
+          error: {
+            message: 'Invalid bucket name',
+            userMessage: '桶名必须为 3-64 位，只允许小写字母、数字和连字符。'
+          }
+        };
+      }
+
+      if (!['Standard', 'InfrequentAccess'].includes(storageClass)) {
+        return {
+          success: false,
+          error: {
+            message: 'Invalid storage class',
+            userMessage: '存储类型仅支持 Standard 或 InfrequentAccess。'
+          }
+        };
+      }
+
+      const result = await callCloudflareR2Api({
+        method: 'PATCH',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: `/r2/buckets/${encodeURIComponent(bucketName)}`,
+        extraHeaders: {
+          'cf-r2-storage-class': storageClass
+        }
+      });
+
+      return {
+        success: true,
+        data: result
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:updateBucket');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '更新存储桶失败，请检查 Cloudflare API 配置。'
+        }
+      };
+    }
+  });
+
+  // Handler for deleting bucket (with clear objects first)
+  ipcMain.handle('settings:deleteBucket', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+
+      const bucketName = String(payload?.bucketName || '').trim();
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+      if (!/^[a-z0-9-]{3,64}$/.test(bucketName)) {
+        return {
+          success: false,
+          error: {
+            message: 'Invalid bucket name',
+            userMessage: '桶名必须为 3-64 位，只允许小写字母、数字和连字符。'
+          }
+        };
+      }
+
+      const inputAccessKeyId = typeof payload?.accessKeyId === 'string' ? payload.accessKeyId.trim() : '';
+      const inputSecretAccessKey = typeof payload?.secretAccessKey === 'string' ? payload.secretAccessKey.trim() : '';
+      let credentials = null;
+      if (inputAccessKeyId && inputSecretAccessKey) {
+        credentials = {
+          accessKeyId: inputAccessKeyId,
+          secretAccessKey: inputSecretAccessKey
+        };
+      } else {
+        credentials = resolveCredentials();
+      }
+
+      if (!CredentialManager.validateCredentials(credentials)) {
+        return {
+          success: false,
+          error: {
+            message: 'Missing credentials',
+            userMessage: UI_TEXT.errorAuthDetail || '请先在设置中配置 R2 凭证'
+          }
+        };
+      }
+
+      const deletedObjects = await clearBucketObjectsViaS3({
+        endpoint: r2Settings.endpoint,
+        region: r2Settings.region,
+        bucket: bucketName,
+        accessKeyId: credentials.accessKeyId,
+        secretAccessKey: credentials.secretAccessKey
+      });
+
+      await callCloudflareR2Api({
+        method: 'DELETE',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: `/r2/buckets/${encodeURIComponent(bucketName)}`
+      });
+
+      return {
+        success: true,
+        data: {
+          deletedObjects
+        }
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:deleteBucket');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '删除存储桶失败，请检查桶权限与 Cloudflare API 配置。'
         }
       };
     }

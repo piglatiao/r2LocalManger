@@ -477,6 +477,40 @@
               </button>
             </div>
           </div>
+
+          <div class="form-group">
+            <label class="form-label">新建存储桶</label>
+            <div class="input-group" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <input type="text" id="new-bucket-name" class="form-input" placeholder="new-bucket-name" style="min-width: 220px; flex: 1;">
+              <select id="new-bucket-location-hint" class="form-select" style="min-width: 140px;">
+                <option value="">Location(auto)</option>
+                <option value="apac">apac</option>
+                <option value="eeur">eeur</option>
+                <option value="enam">enam</option>
+                <option value="weur">weur</option>
+                <option value="wnam">wnam</option>
+                <option value="oc">oc</option>
+              </select>
+              <select id="new-bucket-storage-class" class="form-select" style="min-width: 180px;">
+                <option value="Standard">Standard</option>
+                <option value="InfrequentAccess">InfrequentAccess</option>
+              </select>
+              <button id="btn-create-bucket" class="btn btn-primary" type="button">创建桶</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">编辑 / 删除当前桶</label>
+            <div class="input-group" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <select id="edit-bucket-storage-class" class="form-select" style="min-width: 180px;">
+                <option value="Standard">Standard</option>
+                <option value="InfrequentAccess">InfrequentAccess</option>
+              </select>
+              <button id="btn-update-bucket" class="btn btn-secondary" type="button">更新存储类型</button>
+              <button id="btn-delete-bucket" class="btn btn-danger" type="button">删除桶（先清空对象）</button>
+            </div>
+            <p class="help-text">删除操作会先清空桶内所有对象，再执行删除。</p>
+          </div>
           
           <!-- Bucket list -->
           <div id="bucket-list-container" style="display: none;">
@@ -513,6 +547,26 @@
             <label class="form-label" for="public-url" data-i18n="publicUrl">自定义域名</label>
             <input type="text" id="public-url" class="form-input" value="" placeholder="https://cdn.example.com">
             <p class="help-text" data-i18n="publicUrlHelp">可选。用于生成文件访问链接；不填写时使用 S3 地址。</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cloudflare-account-id">Cloudflare Account ID</label>
+            <input type="text" id="cloudflare-account-id" class="form-input" value="" placeholder="可为空，默认尝试从 endpoint 推断">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cloudflare-api-token">Cloudflare API Token</label>
+            <input type="password" id="cloudflare-api-token" class="form-input" value="" placeholder="用于列桶/创建/编辑/删除桶">
+            <p class="help-text">需要具备 R2 桶管理权限。若 S3 Key 无法列桶，系统会自动回退到该 API。</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cloudflare-jurisdiction">cf-r2-jurisdiction</label>
+            <select id="cloudflare-jurisdiction" class="form-select">
+              <option value="default">default</option>
+              <option value="eu">eu</option>
+              <option value="fedramp">fedramp</option>
+            </select>
           </div>
         </div>
       </div>
