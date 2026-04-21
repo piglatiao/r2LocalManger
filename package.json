@@ -1,0 +1,51 @@
+{
+  "name": "r2-storage-manager",
+  "version": "1.0.0",
+  "description": "R2 存储管理器 - Windows 桌面应用程序，用于管理 Cloudflare R2 存储桶对象",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build": "electron-builder --dir",
+    "package:win": "electron-builder --win --x64",
+    "test": "jest"
+  },
+  "keywords": [
+    "electron",
+    "r2",
+    "cloudflare",
+    "storage",
+    "s3"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.700.0",
+    "dotenv": "^17.4.2",
+    "electron": "^33.2.0",
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^25.1.8",
+    "jest": "^30.3.0"
+  },
+  "build": {
+    "appId": "com.r2storagemanager.app",
+    "productName": "R2 存储管理器",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052"
+    }
+  }
+}

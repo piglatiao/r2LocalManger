@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>R2 存储管理器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 工具栏 -->
+    <header id="toolbar">
+      <button id="btn-upload" class="toolbar-btn">
+        <span class="btn-icon">📤</span>
+        <span class="btn-text" data-i18n="uploadButton">上传</span>
+      </button>
+      <button id="btn-download" class="toolbar-btn" disabled>
+        <span class="btn-icon">📥</span>
+        <span class="btn-text" data-i18n="downloadButton">下载</span>
+      </button>
+      <button id="btn-preview" class="toolbar-btn" disabled>
+        <span class="btn-icon">👁️</span>
+        <span class="btn-text" data-i18n="previewButton">预览</span>
+      </button>
+      <button id="btn-delete" class="toolbar-btn" disabled>
+        <span class="btn-icon">🗑️</span>
+        <span class="btn-text" data-i18n="deleteButton">删除</span>
+      </button>
+      <button id="btn-refresh" class="toolbar-btn">
+        <span class="btn-icon">🔄</span>
+        <span class="btn-text" data-i18n="refreshButton">刷新</span>
+      </button>
+      <div class="toolbar-separator"></div>
+      <button id="btn-settings" class="toolbar-btn">
+        <span class="btn-icon">⚙️</span>
+        <span class="btn-text" data-i18n="menuSettings">设置</span>
+      </button>
+      <div class="toolbar-separator"></div>
+      <div class="search-container">
+        <input type="text" id="search-input" class="search-input" placeholder="搜索文件..." data-i18n-placeholder="placeholderSearch">
+        <button id="btn-clear-search" class="clear-search-btn" style="display: none;">✕</button>
+      </div>
+      <div class="toolbar-separator"></div>
+      <div class="filter-container">
+        <label for="filter-type" class="filter-label" data-i18n="labelFileType">文件类型:</label>
+        <select id="filter-type" class="filter-select">
+          <option value="all" data-i18n="filterAllTypes">全部类型</option>
+          <option value="image" data-i18n="filterImages">图片</option>
+          <option value="video" data-i18n="filterVideos">视频</option>
+          <option value="audio" data-i18n="filterAudio">音频</option>
+          <option value="document" data-i18n="filterDocuments">文档</option>
+          <option value="archive" data-i18n="filterArchives">压缩包</option>
+          <option value="code" data-i18n="filterCode">代码</option>
+          <option value="text" data-i18n="filterText">文本</option>
+        </select>
+      </div>
+      <div class="toolbar-separator"></div>
+      <div class="date-filter-container">
+        <label for="filter-date-start" class="filter-label" data-i18n="labelDateRange">日期范围:</label>
+        <input type="date" id="filter-date-start" class="date-input" data-i18n-placeholder="labelStartDate">
+        <span class="date-separator">-</span>
+        <input type="date" id="filter-date-end" class="date-input" data-i18n-placeholder="labelEndDate">
+        <button id="btn-clear-date" class="clear-date-btn" style="display: none;" title="清除日期筛选">✕</button>
+      </div>
+    </header>
+    
+    <!-- 主内容区域 - 对象列表 -->
+    <main id="content" data-drop-hint="拖放文件到此处上传">
+      <div id="loading" class="loading-indicator" style="display: none;">
+        <div class="spinner"></div>
+        <p data-i18n="statusLoading">正在加载...</p>
+      </div>
+      
+      <div id="progress-overlay" class="progress-overlay" style="display: none;">
+        <div class="progress-dialog">
+          <div class="progress-title" id="progress-title">正在操作...</div>
+          <div class="progress-current-file" id="progress-current-file"></div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+          <div class="progress-info">
+            <span class="progress-text" id="progress-text">0%</span>
+            <span class="progress-speed" id="progress-speed"></span>
+            <span class="progress-eta" id="progress-eta"></span>
+          </div>
+          <div class="progress-batch-info" id="progress-batch-info"></div>
+          <div class="progress-actions">
+            <button id="btn-cancel-progress" class="cancel-btn" style="display: none;">取消</button>
+          </div>
+        </div>
+      </div>
+      
+      <div id="object-list-container">
+        <table id="object-list">
+          <thead>
+            <tr>
+              <th class="col-icon" data-i18n="columnIcon">图标</th>
+              <th class="col-name" data-i18n="columnName">文件名</th>
+              <th class="col-size" data-i18n="columnSize">大小</th>
+              <th class="col-modified" data-i18n="columnModified">修改时间</th>
+            </tr>
+          </thead>
+          <tbody id="object-list-body">
+            <!-- 对象列表将动态插入此处 -->
+          </tbody>
+        </table>
+        
+        <div id="empty-state" style="display: none;">
+          <p>暂无对象</p>
+          <p class="hint">点击"上传"按钮添加文件</p>
+        </div>
+      </div>
+    </main>
+    
+    <!-- 状态栏 -->
+    <footer id="status-bar">
+      <span id="status-text" data-i18n="statusReady">就绪</span>
+      <span id="object-count">共 0 个对象</span>
+    </footer>
+    
+    <!-- 右键菜单 -->
+    <div id="context-menu" class="context-menu" style="display: none;">
+      <div class="menu-item" data-action="upload" data-i18n="menuUpload">上传</div>
+      <div class="menu-item" data-action="download" data-i18n="menuDownload">下载</div>
+      <div class="menu-item" data-action="preview" data-i18n="menuPreview">预览</div>
+      <div class="menu-item" data-action="delete" data-i18n="menuDelete">删除</div>
+      <div class="menu-separator"></div>
+      <div class="menu-item has-submenu" data-action="copy-url">
+        <span data-i18n="menuCopyUrl">复制链接</span>
+        <span class="submenu-arrow">▶</span>
+        <div class="submenu">
+          <div class="submenu-item" data-format="url" data-i18n="menuCopyUrl">复制链接</div>
+          <div class="submenu-item" data-format="html" data-i18n="menuCopyHtml">复制 HTML</div>
+          <div class="submenu-item" data-format="markdown" data-i18n="menuCopyMarkdown">复制 Markdown</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- 通知容器 -->
+    <div id="notification-container"></div>
+  </div>
+  
+  <script src="../../i18n/zh-CN.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
