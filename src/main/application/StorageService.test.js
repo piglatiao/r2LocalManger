@@ -328,7 +328,7 @@ describe('StorageService', () => {
       expect(result.metadata).toEqual(mockMetadata);
     });
 
-    test('should return other type for unsupported files', async () => {
+    test('should return pdf preview data', async () => {
       const key = 'document.pdf';
       const mockBuffer = Buffer.from('fake pdf data');
       const mockMetadata = {
@@ -350,7 +350,34 @@ describe('StorageService', () => {
 
       const result = await storageService.previewFile(key);
 
-      expect(result.type).toBe(FileType.OTHER);
+      expect(result.type).toBe(FileType.PDF);
+      expect(result.content).toEqual(mockBuffer);
+      expect(result.metadata).toEqual(mockMetadata);
+    });
+
+    test('should return video preview data', async () => {
+      const key = 'video.mp4';
+      const mockBuffer = Buffer.from('fake video data');
+      const mockMetadata = {
+        contentType: 'video/mp4',
+        contentLength: mockBuffer.length,
+        lastModified: new Date()
+      };
+
+      const mockStream = {
+        [Symbol.asyncIterator]: async function* () {
+          yield mockBuffer;
+        }
+      };
+
+      mockR2Client.getObjectStream.mockResolvedValue({
+        stream: mockStream,
+        metadata: mockMetadata
+      });
+
+      const result = await storageService.previewFile(key);
+
+      expect(result.type).toBe(FileType.VIDEO);
       expect(result.content).toEqual(mockBuffer);
       expect(result.metadata).toEqual(mockMetadata);
     });
@@ -418,10 +445,18 @@ describe('StorageService', () => {
       expect(storageService._detectFileType('error.log')).toBe(FileType.TEXT);
     });
 
+    test('should detect video files', () => {
+      expect(storageService._detectFileType('video.mp4')).toBe(FileType.VIDEO);
+      expect(storageService._detectFileType('movie.mkv')).toBe(FileType.VIDEO);
+      expect(storageService._detectFileType('clip.webm')).toBe(FileType.VIDEO);
+    });
+
+    test('should detect pdf files', () => {
+      expect(storageService._detectFileType('document.pdf')).toBe(FileType.PDF);
+    });
+
     test('should detect other file types', () => {
-      expect(storageService._detectFileType('document.pdf')).toBe(FileType.OTHER);
       expect(storageService._detectFileType('archive.zip')).toBe(FileType.OTHER);
-      expect(storageService._detectFileType('video.mp4')).toBe(FileType.OTHER);
       expect(storageService._detectFileType('audio.mp3')).toBe(FileType.OTHER);
     });
 

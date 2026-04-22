@@ -193,6 +193,8 @@ const FILE_TYPE_ICONS = {
   other: { icon: '📄', types: [] }
 };
 
+const PREVIEWABLE_FILE_TYPES = new Set(['image', 'video', 'pdf']);
+
 /**
  * 初始化应用
  */
@@ -1234,7 +1236,13 @@ function handleTableDoubleClick(event) {
   
   const key = row.dataset.key;
   selectObject(key);
-  handlePreview();
+
+  if (isPreviewableFile(key)) {
+    handlePreview();
+    return;
+  }
+
+  handleDownload();
 }
 
 /**
@@ -1290,8 +1298,9 @@ function selectAll() {
  */
 function updateButtonStates() {
   const hasSelection = state.selectedObjects.size > 0;
+  const selectedObject = getSingleSelectedObject();
   elements.btnDownload.disabled = !hasSelection;
-  elements.btnPreview.disabled = state.selectedObjects.size !== 1;
+  elements.btnPreview.disabled = !selectedObject || !isPreviewableFile(selectedObject.key);
   elements.btnDelete.disabled = !hasSelection;
 }
 
@@ -1323,6 +1332,20 @@ function updateSelectionCount() {
  */
 function getSelectedObjects() {
   return state.objects.filter(obj => state.selectedObjects.has(obj.key));
+}
+
+function getSingleSelectedObject() {
+  const selected = getSelectedObjects();
+  return selected.length === 1 ? selected[0] : null;
+}
+
+function getPreviewType(filename) {
+  const fileType = getFileTypeCategory(filename);
+  return PREVIEWABLE_FILE_TYPES.has(fileType) ? fileType : null;
+}
+
+function isPreviewableFile(filename) {
+  return Boolean(getPreviewType(filename));
 }
 
 /**
@@ -1380,7 +1403,7 @@ async function handleDownload() {
   
   // 单个下载
   const obj = selected[0];
-  
+
   try {
     const result = await window.electronAPI.saveFile(obj.key);
     if (!result || result.canceled) return;
@@ -1501,6 +1524,11 @@ async function handlePreview() {
   if (selected.length === 0) return;
   
   const obj = selected[0];
+
+  if (!isPreviewableFile(obj.key)) {
+    await handleDownload();
+    return;
+  }
   
   try {
     updateStatus(UI_TEXT.previewLoadingImage || '正在加载...');
@@ -1848,10 +1876,28 @@ function handleContextMenu(event) {
   
   // 更新菜单项状态
   const hasSelection = state.selectedObjects.size > 0;
+  const selectedObject = getSingleSelectedObject();
+  const canPreview = Boolean(selectedObject && isPreviewableFile(selectedObject.key));
   const menuItems = elements.contextMenu.querySelectorAll('.menu-item');
+  const previewMenuItem = elements.contextMenu.querySelector('.menu-item[data-action="preview"]');
+
+  if (previewMenuItem) {
+    previewMenuItem.style.display = canPreview ? 'block' : 'none';
+  }
+
   menuItems.forEach(item => {
     const action = item.dataset.action;
-    if (['download', 'preview', 'delete', 'copy-url'].includes(action)) {
+
+    if (action === 'preview') {
+      if (canPreview) {
+        item.classList.remove('disabled');
+      } else {
+        item.classList.add('disabled');
+      }
+      return;
+    }
+
+    if (['download', 'delete', 'copy-url'].includes(action)) {
       if (hasSelection) {
         item.classList.remove('disabled');
       } else {

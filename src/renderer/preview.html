@@ -8,46 +8,47 @@
 </head>
 <body>
   <div id="preview-app">
-    <!-- 头部 -->
     <header id="preview-header">
       <h1 id="preview-title">预览</h1>
       <button id="btn-close" class="close-btn">
-        <span class="close-icon">✕</span>
+        <span class="close-icon">×</span>
         <span class="close-text" data-i18n="previewButtonClose">关闭</span>
       </button>
     </header>
-    
-    <!-- 内容区域 -->
+
     <main id="preview-content">
-      <!-- 加载指示器 -->
       <div id="loading-indicator" class="loading-indicator">
         <div class="spinner"></div>
         <p id="loading-text" data-i18n="previewLoadingImage">正在加载...</p>
       </div>
-      
-      <!-- 错误显示 -->
+
       <div id="error-display" class="error-display" style="display: none;">
-        <div class="error-icon">⚠️</div>
+        <div class="error-icon">!</div>
         <p id="error-message" data-i18n="previewError">无法预览文件</p>
       </div>
-      
-      <!-- 图片查看器 -->
+
       <div id="image-viewer" class="viewer image-viewer" style="display: none;">
         <img id="preview-image" src="" alt="预览图片">
         <div id="zoom-controls" class="zoom-controls">
-          <button id="btn-zoom-out" class="zoom-btn" title="缩小">−</button>
+          <button id="btn-zoom-out" class="zoom-btn" title="缩小">-</button>
           <span id="zoom-level" class="zoom-level">100%</span>
           <button id="btn-zoom-in" class="zoom-btn" title="放大">+</button>
-          <button id="btn-zoom-reset" class="zoom-btn" title="重置">重置</button>
+          <button id="btn-zoom-reset" class="zoom-btn zoom-btn-reset" title="重置缩放">1:1</button>
         </div>
       </div>
-      
-      <!-- 文本查看器 -->
+
+      <div id="video-viewer" class="viewer video-viewer" style="display: none;">
+        <video id="preview-video" controls preload="metadata"></video>
+      </div>
+
+      <div id="pdf-viewer" class="viewer pdf-viewer" style="display: none;">
+        <iframe id="preview-pdf" title="PDF Preview"></iframe>
+      </div>
+
       <div id="text-viewer" class="viewer text-viewer" style="display: none;">
         <pre id="preview-text"></pre>
       </div>
-      
-      <!-- 信息查看器 -->
+
       <div id="info-viewer" class="viewer info-viewer" style="display: none;">
         <div class="info-item">
           <span class="info-label" data-i18n="previewLabelFilename">文件名:</span>
@@ -71,7 +72,7 @@
       </div>
     </main>
   </div>
-  
+
   <script src="../../i18n/zh-CN.js"></script>
   <script src="preview.js"></script>
 </body>

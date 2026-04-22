@@ -36,6 +36,8 @@ function _getErrorLogger() {
  */
 const FileType = {
   IMAGE: 'image',
+  VIDEO: 'video',
+  PDF: 'pdf',
   TEXT: 'text',
   OTHER: 'other'
 };
@@ -44,6 +46,8 @@ const FileType = {
  * Supported file extensions for preview
  */
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+const VIDEO_EXTENSIONS = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'mkv', 'webm'];
+const PDF_EXTENSIONS = ['pdf'];
 const TEXT_EXTENSIONS = ['txt', 'md', 'json', 'xml', 'html', 'css', 'js', 'ts', 'yaml', 'yml', 'log'];
 
 /**
@@ -252,6 +256,14 @@ class StorageService {
 
     if (IMAGE_EXTENSIONS.includes(ext)) {
       return FileType.IMAGE;
+    }
+
+    if (VIDEO_EXTENSIONS.includes(ext)) {
+      return FileType.VIDEO;
+    }
+
+    if (PDF_EXTENSIONS.includes(ext)) {
+      return FileType.PDF;
     }
 
     if (TEXT_EXTENSIONS.includes(ext)) {

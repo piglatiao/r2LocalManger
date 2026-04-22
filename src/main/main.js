@@ -2,7 +2,9 @@
 require('dotenv').config();
 
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const fs = require('fs/promises');
 const path = require('path');
+const { pathToFileURL } = require('url');
 
 // Import i18n UI text strings
 const { UI_TEXT } = require('../../i18n/zh-CN');
@@ -665,6 +667,56 @@ async function promptStartupCheckFailure(startupCheckResult) {
 
 // ==================== Preview Window ====================
 
+async function cleanupPreviewTempFile(targetWindow) {
+  const tempFilePath = targetWindow?.__previewTempFilePath;
+  if (!tempFilePath) {
+    return;
+  }
+
+  targetWindow.__previewTempFilePath = null;
+
+  try {
+    await fs.unlink(tempFilePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      ErrorLogger.logError(error, 'preview:cleanupTempFile', { tempFilePath });
+    }
+  }
+}
+
+function normalizePreviewBuffer(content) {
+  if (Buffer.isBuffer(content)) {
+    return content;
+  }
+
+  if (content instanceof Uint8Array) {
+    return Buffer.from(content);
+  }
+
+  if (content && content.type === 'Buffer' && Array.isArray(content.data)) {
+    return Buffer.from(content.data);
+  }
+
+  throw new Error('Invalid preview content buffer');
+}
+
+function showAndFocusWindow(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return;
+  }
+
+  if (targetWindow.isMinimized()) {
+    targetWindow.restore();
+  }
+
+  targetWindow.show();
+  targetWindow.focus();
+
+  if (typeof targetWindow.moveTop === 'function') {
+    targetWindow.moveTop();
+  }
+}
+
 /**
  * 创建预览窗口
  * @param {Object} previewData - 预览数据
@@ -682,11 +734,10 @@ function createPreviewWindow(previewData) {
     minWidth: 400,
     minHeight: 300,
     title: UI_TEXT.previewWindowTitle ? UI_TEXT.previewWindowTitle.replace('{filename}', previewData.key) : `预览 - ${previewData.key}`,
-    parent: mainWindow,
-    modal: false,
     webPreferences: {
       nodeIntegration: true,
-      contextIsolation: false
+      contextIsolation: false,
+      plugins: true
     },
     icon: path.join(__dirname, '../../assets/icon.ico'),
     autoHideMenuBar: true
@@ -694,26 +745,61 @@ function createPreviewWindow(previewData) {
   
   // 加载预览窗口 HTML
   previewWindow.loadFile(path.join(__dirname, '../renderer/preview.html'));
+  showAndFocusWindow(previewWindow);
   
   // 当预览窗口准备好时，发送预览数据
-  previewWindow.webContents.on('did-finish-load', () => {
+  previewWindow.webContents.once('did-finish-load', () => {
     previewWindow.webContents.send('preview:data', previewData);
+    showAndFocusWindow(previewWindow);
   });
   
   // 监听预览窗口准备好的消息
-  ipcMain.on('preview:ready', () => {
+  ipcMain.once('preview:ready', () => {
     if (previewWindow && previewData) {
       previewWindow.webContents.send('preview:data', previewData);
     }
   });
   
   // 窗口关闭时清理引用
+  const currentWindow = previewWindow;
   previewWindow.on('closed', () => {
-    previewWindow = null;
+    cleanupPreviewTempFile(currentWindow).catch(() => {});
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      mainWindow.focus();
+    }
+    if (previewWindow === currentWindow) {
+      previewWindow = null;
+    }
   });
   
   // 开发环境下打开开发者工具（可选）
   // previewWindow.webContents.openDevTools();
+}
+
+async function loadPdfIntoPreviewWindow(previewData) {
+  if (!previewWindow || previewWindow.isDestroyed()) {
+    createPreviewWindow({ key: previewData.key, loading: true });
+  }
+
+  const currentWindow = previewWindow;
+  const pdfBuffer = normalizePreviewBuffer(previewData.content);
+  const tempFilePath = path.join(
+    app.getPath('temp'),
+    `r2-preview-${Date.now()}-${Math.random().toString(16).slice(2)}.pdf`
+  );
+
+  await fs.writeFile(tempFilePath, pdfBuffer);
+  await cleanupPreviewTempFile(currentWindow);
+
+  currentWindow.__previewTempFilePath = tempFilePath;
+  currentWindow.setTitle(
+    UI_TEXT.previewWindowTitle ? UI_TEXT.previewWindowTitle.replace('{filename}', previewData.key) : `预览 - ${previewData.key}`
+  );
+  await currentWindow.loadURL(pathToFileURL(tempFilePath).href);
+  showAndFocusWindow(currentWindow);
 }
 
 /**
@@ -820,10 +906,13 @@ function registerDialogHandlers() {
       const result = await dialog.showOpenDialog(mainWindow, {
         title: UI_TEXT.dialogSelectFile,
         properties: ['openFile'],
-        filters: [
+        legacyFilters: [
           { name: '所有文件', extensions: ['*'] },
           { name: '图片文件', extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'] },
           { name: '文本文件', extensions: ['txt', 'md', 'json', 'xml', 'html', 'css', 'js', 'ts', 'yaml', 'yml', 'log'] }
+        ],
+        filters: [
+          { name: 'All Files', extensions: ['*'] }
         ]
       });
       
@@ -1387,10 +1476,16 @@ function registerIPCHandlers() {
       createPreviewWindow({ key, loading: true });
       
       // 然后加载文件内容
+      createPreviewWindow({ key, loading: true });
       const previewData = await activeStorageService.previewFile(key);
       
       // 添加 key 到预览数据
       previewData.key = key;
+
+      if (previewData.type === 'pdf') {
+        await loadPdfIntoPreviewWindow(previewData);
+        return { success: true, data: previewData };
+      }
       
       // 发送预览数据到已打开的窗口
       if (previewWindow) {
