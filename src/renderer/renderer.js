@@ -168,7 +168,8 @@ const state = {
   filterType: 'all', // 当前文件类型筛选
   filterDateStart: null, // 日期范围筛选 - 开始日期
   filterDateEnd: null, // 日期范围筛选 - 结束日期
-  isSettingsEmbeddedOpen: false
+  isSettingsEmbeddedOpen: false,
+  hasCompletedInitialListLoad: false
 };
 
 // 文件类型图标映射
@@ -620,6 +621,10 @@ function showNotification(message, type = 'info') {
 /**
  * 加载对象列表
  */
+function shouldSuppressInitialStorageListError(error) {
+  return !state.hasCompletedInitialListLoad && error?.code === 'SERVICE_NOT_READY';
+}
+
 async function loadObjectList() {
   showLoading();
   updateStatus(UI_TEXT.statusLoading || '正在加载...');
@@ -664,7 +669,20 @@ async function loadObjectList() {
     }
   } catch (error) {
     console.error('加载对象列表失败:', error);
-    hideLoading();
+
+    if (shouldSuppressInitialStorageListError(error)) {
+      const startupMessage = String(
+        error.userMessage || UI_TEXT.startupCheckMessageMissingCredentials || '启动检查发现未配置凭证，请先完成配置。'
+      ).replace(/\s+/g, ' ').trim();
+
+      state.objects = [];
+      state.filteredObjects = [];
+      renderObjectList();
+      updateObjectCount(0);
+      updateStatus(startupMessage);
+      showEmptyState();
+      return;
+    }
     
     // 使用错误恢复处理
     await handleErrorWithRecovery(error, 'list', loadObjectList);
@@ -672,9 +690,10 @@ async function loadObjectList() {
     updateStatus(UI_TEXT.statusReady || '就绪');
     showEmptyState();
     return;
+  } finally {
+    state.hasCompletedInitialListLoad = true;
+    hideLoading();
   }
-  
-  hideLoading();
 }
 
 /**

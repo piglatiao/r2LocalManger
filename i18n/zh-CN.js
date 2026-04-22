@@ -75,7 +75,7 @@ var UI_TEXT = {
   // Startup check
   startupCheckMessageMissingCredentials: '启动检查发现未配置凭证，请先完成配置。',
   startupCheckMessageInvalidSettings: '启动检查发现 R2 配置无效，请检查 S3 地址、区域、桶名等设置。',
-  startupCheckMessageConnectionFailed: '启动检查失败：无法连接到 R2，请检查配置。',
+  startupCheckMessageConnectionFailed: '启动检查失败：无法连接到 R2，请检查连接或配置。',
   startupCheckDetail: '可点击“检查配置”打开设置页面。',
   startupCheckButtonOpenSettings: '检查配置',
   startupCheckButtonLater: '稍后',

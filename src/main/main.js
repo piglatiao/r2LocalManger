@@ -40,6 +40,23 @@ const StartupCheckStatus = {
   CONNECTION_FAILED: 'CONNECTION_FAILED'
 };
 
+let lastStartupCheckResult = {
+  ok: true,
+  status: StartupCheckStatus.OK
+};
+
+function getStartupCheckMessage(status) {
+  if (status === StartupCheckStatus.MISSING_CREDENTIALS) {
+    return UI_TEXT.startupCheckMessageMissingCredentials || '启动检查发现未配置凭证，请先完成配置。';
+  }
+
+  if (status === StartupCheckStatus.INVALID_SETTINGS) {
+    return UI_TEXT.startupCheckMessageInvalidSettings || '启动检查发现 R2 配置无效，请检查 S3 地址、区域、桶名等设置。';
+  }
+
+  return UI_TEXT.startupCheckMessageConnectionFailed || '启动检查失败：无法连接到 R2，请检查连接或配置。';
+}
+
 /**
  * 标准化 URL（自动补全 https://，并去掉末尾 /）
  * @param {string} rawUrl - 原始 URL
@@ -537,6 +554,10 @@ function initializeStorageService(credentials, r2SettingsInput = {}) {
   const config = buildR2Config(credentials, r2SettingsInput);
   const r2Client = new R2Client(config);
   storageService = new StorageService(r2Client);
+  lastStartupCheckResult = {
+    ok: true,
+    status: StartupCheckStatus.OK
+  };
 }
 
 /**
@@ -578,6 +599,7 @@ function createTimeoutPromise(timeoutMs) {
 async function runStartupHealthCheck() {
   const credentials = resolveCredentials();
   if (!CredentialManager.validateCredentials(credentials)) {
+    // 未配置凭证时只提示去配置，不继续做连接检查。
     storageService = null;
     return {
       ok: false,
@@ -602,7 +624,7 @@ async function runStartupHealthCheck() {
     const config = buildR2Config(credentials, r2Settings);
     const r2Client = new R2Client(config);
 
-    // 启动时做一次轻量连接探测，失败则提示用户检查配置
+    // 只有在检测到可用配置后，才继续做一次轻量连接探测。
     await Promise.race([
       r2Client.listObjects(),
       createTimeoutPromise(STARTUP_CHECK_TIMEOUT_MS)
@@ -633,14 +655,12 @@ async function promptStartupCheckFailure(startupCheckResult) {
     return;
   }
 
-  let message = UI_TEXT.startupCheckMessageConnectionFailed || '启动检查失败：无法连接到 R2，请检查配置。';
+  let message = getStartupCheckMessage(startupCheckResult.status);
   let detail = UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。';
 
   if (startupCheckResult.status === StartupCheckStatus.MISSING_CREDENTIALS) {
-    message = UI_TEXT.startupCheckMessageMissingCredentials || '启动检查发现未配置凭证，请先完成配置。';
     detail = UI_TEXT.errorAuthDetail || '请先在“设置 > 凭证配置”中填写 R2 凭证，或正确设置环境变量 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY';
   } else if (startupCheckResult.status === StartupCheckStatus.INVALID_SETTINGS) {
-    message = UI_TEXT.startupCheckMessageInvalidSettings || '启动检查发现 R2 配置无效，请检查 S3 地址、区域、桶名等设置。';
     detail = startupCheckResult.error?.message || (UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。');
   } else if (startupCheckResult.status === StartupCheckStatus.CONNECTION_FAILED) {
     const errorMessage = startupCheckResult.error?.message ? `\n${startupCheckResult.error.message}` : '';
@@ -859,6 +879,8 @@ app.on('ready', async () => {
     storageService = null;
     ErrorLogger.logError(error, 'app:ready:startupHealthCheck');
   }
+
+  lastStartupCheckResult = startupCheckResult;
 
   // Register dialog handlers
   registerDialogHandlers();
@@ -1175,13 +1197,17 @@ function registerIPCHandlers() {
       ErrorLogger.logError(error, 'storage:list');
       
       // Get user-friendly message
-      const userMessage = ErrorHandler.getUserMessage(error);
+      let userMessage = ErrorHandler.getUserMessage(error);
+      if (error.code === 'SERVICE_NOT_READY' && lastStartupCheckResult && !lastStartupCheckResult.ok) {
+        userMessage = getStartupCheckMessage(lastStartupCheckResult.status);
+      }
       
       return {
         success: false,
         error: {
           message: error.message,
           userMessage: userMessage,
+          code: error.code,
           errorType: error.errorType,
           operation: error.operation,
           fileSystemCode: error.fileSystemCode,
@@ -1672,6 +1698,10 @@ function registerSettingsHandlers() {
           initializeStorageService(credentials, savedConfig);
         } else {
           storageService = null;
+          lastStartupCheckResult = {
+            ok: false,
+            status: StartupCheckStatus.MISSING_CREDENTIALS
+          };
         }
       } catch (updateError) {
         ErrorLogger.logError(updateError, 'settings:saveR2Config:update');
@@ -1772,6 +1802,10 @@ function registerSettingsHandlers() {
       
       store.clear();
       storageService = null;
+      lastStartupCheckResult = {
+        ok: false,
+        status: StartupCheckStatus.MISSING_CREDENTIALS
+      };
       
       return { success: true };
     } catch (error) {
@@ -1977,6 +2011,10 @@ function registerSettingsHandlers() {
           initializeStorageService(credentials, savedConfig);
         } else {
           storageService = null;
+          lastStartupCheckResult = {
+            ok: false,
+            status: StartupCheckStatus.MISSING_CREDENTIALS
+          };
         }
       } catch (updateError) {
         ErrorLogger.logError(updateError, 'settings:setCurrentBucket:update');
