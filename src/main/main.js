@@ -1548,6 +1548,41 @@ function registerIPCHandlers() {
     }
   });
 
+  // Handler for loading image thumbnail data
+  ipcMain.handle('storage:thumbnail', async (event, key) => {
+    try {
+      const activeStorageService = getStorageServiceOrThrow('preview');
+      const previewData = await activeStorageService.previewFile(key);
+      previewData.key = key;
+
+      if (previewData.type !== 'image') {
+        const error = new Error('Thumbnail preview is only supported for image files');
+        error.userMessage = UI_TEXT.previewNotSupported || '不支持预览此文件类型，请下载后查看';
+        throw error;
+      }
+
+      return { success: true, data: previewData };
+    } catch (error) {
+      ErrorLogger.logError(error, 'storage:thumbnail', { key });
+
+      const userMessage = error.userMessage || ErrorHandler.getOperationMessage(error, 'preview');
+
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: userMessage,
+          errorType: error.errorType,
+          operation: 'thumbnail',
+          fileSystemCode: error.fileSystemCode,
+          isRetryable: ErrorHandler.isRetryable(error),
+          shouldRefreshList: ErrorHandler.shouldRefreshList(error),
+          isAuthError: ErrorHandler.isAuthError(error)
+        }
+      };
+    }
+  });
+
   // Handler for copying URL to clipboard
   ipcMain.handle('storage:copy-url', async (event, key, format) => {
     try {

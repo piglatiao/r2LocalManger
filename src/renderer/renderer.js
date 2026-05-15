@@ -87,6 +87,12 @@ const electronAPI = {
     if (!result.success) throw result.error;
     return result.data;
   },
+
+  getThumbnail: async (key) => {
+    const result = await ipcRenderer.invoke('storage:thumbnail', key);
+    if (!result.success) throw result.error;
+    return result.data;
+  },
   
   copyUrl: async (key, format) => {
     const result = await ipcRenderer.invoke('storage:copy-url', key, format);
@@ -194,7 +200,10 @@ const FILE_TYPE_ICONS = {
   other: { icon: '📄', types: [] }
 };
 
+const IMAGE_FILE_TYPES = new Set(FILE_TYPE_ICONS.image.types);
 const PREVIEWABLE_FILE_TYPES = new Set(['image', 'video', 'pdf']);
+const thumbnailObjectUrls = new Map();
+const thumbnailRequests = new Map();
 
 /**
  * 初始化应用
@@ -260,6 +269,7 @@ function init() {
 
   // 监听来自设置页（内嵌 iframe）的关闭消息
   window.addEventListener('message', handleSettingsEmbeddedMessage);
+  window.addEventListener('beforeunload', cleanupAllThumbnailObjectUrls);
   
   // 加载对象列表
   loadObjectList();
@@ -280,6 +290,7 @@ function setupErrorRecoveryListeners() {
     console.log('收到列表更新:', data);
     if (data.objects) {
       state.objects = data.objects;
+      cleanupStaleThumbnailObjectUrls(state.objects);
       renderObjectList();
       updateObjectCount(state.objects.length);
       showNotification(UI_TEXT.refreshSuccess || '列表已刷新', 'success');
@@ -659,6 +670,7 @@ async function loadObjectList() {
     // 调用 IPC 获取对象列表
     const objects = await window.electronAPI.listObjects();
     state.objects = objects || [];
+    cleanupStaleThumbnailObjectUrls(state.objects);
     
     renderObjectList();
     updateStatus(UI_TEXT.statusReady || '就绪');
@@ -728,9 +740,7 @@ function renderObjectList() {
     const modified = formatDate(obj.lastModified);
     
     row.innerHTML = `
-      <td class="col-icon">
-        <span class="file-icon ${icon.type}">${icon.icon}</span>
-      </td>
+      <td class="col-icon">${renderFileCell(obj, icon)}</td>
       <td class="col-name">${escapeHtml(obj.key)}</td>
       <td class="col-size">${size}</td>
       <td class="col-modified">${modified}</td>
@@ -739,6 +749,11 @@ function renderObjectList() {
     // 检查是否选中
     if (state.selectedObjects.has(obj.key)) {
       row.classList.add('selected');
+    }
+
+    if (isImageFile(obj.key)) {
+      const previewElement = row.querySelector('.file-preview');
+      hydrateThumbnailCell(previewElement, obj);
     }
     
     elements.objectListBody.appendChild(row);
@@ -1094,6 +1109,201 @@ function getFileIcon(filename) {
   }
   
   return { icon: FILE_TYPE_ICONS.other.icon, type: 'other' };
+}
+
+/**
+ * 渲染文件列表中的预览列。
+ * 图片文件优先显示缩略预览，加载失败时自动回退到原文件图标。
+ * @param {Object} objectInfo - 对象信息
+ * @param {{icon: string, type: string}} iconInfo - 文件图标信息
+ * @returns {string} 预览列 HTML
+ */
+function renderFileCell(objectInfo, iconInfo) {
+  if (isImageFile(objectInfo.key)) {
+    return `
+      <span class="file-preview" title="${escapeHtml(objectInfo.key)}">
+        <span class="file-icon ${iconInfo.type} file-preview-fallback">${escapeHtml(iconInfo.icon)}</span>
+      </span>
+    `;
+  }
+
+  return `<span class="file-icon ${iconInfo.type}">${escapeHtml(iconInfo.icon)}</span>`;
+}
+
+/**
+ * 判断文件是否为图片类型。
+ * @param {string} filename - 文件名
+ * @returns {boolean} 是否为图片
+ */
+function isImageFile(filename) {
+  return IMAGE_FILE_TYPES.has(getFileExtension(filename).toLowerCase());
+}
+
+/**
+ * 为列表中的图片单元格异步加载缩略图。
+ * @param {HTMLElement|null} previewElement - 预览容器
+ * @param {Object} objectInfo - 对象信息
+ */
+function hydrateThumbnailCell(previewElement, objectInfo) {
+  if (!previewElement || !objectInfo || !isImageFile(objectInfo.key)) {
+    return;
+  }
+
+  const cacheKey = getThumbnailCacheKey(objectInfo);
+  const cachedUrl = thumbnailObjectUrls.get(cacheKey);
+  if (cachedUrl) {
+    applyThumbnailToCell(previewElement, cachedUrl, objectInfo.key);
+    return;
+  }
+
+  requestThumbnailObjectUrl(objectInfo).then((thumbnailUrl) => {
+    if (!thumbnailUrl || !previewElement.isConnected) {
+      return;
+    }
+
+    applyThumbnailToCell(previewElement, thumbnailUrl, objectInfo.key);
+  }).catch((error) => {
+    console.error('缩略图加载失败:', error);
+  });
+}
+
+/**
+ * 获取图片缩略图对象 URL，并在内存中缓存。
+ * @param {Object} objectInfo - 对象信息
+ * @returns {Promise<string>} 缩略图对象 URL
+ */
+function requestThumbnailObjectUrl(objectInfo) {
+  const cacheKey = getThumbnailCacheKey(objectInfo);
+  const cachedUrl = thumbnailObjectUrls.get(cacheKey);
+  if (cachedUrl) {
+    return Promise.resolve(cachedUrl);
+  }
+
+  const pendingRequest = thumbnailRequests.get(cacheKey);
+  if (pendingRequest) {
+    return pendingRequest;
+  }
+
+  const request = window.electronAPI.getThumbnail(objectInfo.key).then((previewData) => {
+    const thumbnailUrl = createThumbnailObjectUrl(previewData);
+    if (thumbnailUrl) {
+      thumbnailObjectUrls.set(cacheKey, thumbnailUrl);
+    }
+    return thumbnailUrl;
+  }).catch((error) => {
+    console.error(`加载缩略图失败: ${objectInfo.key}`, error);
+    return '';
+  }).finally(() => {
+    thumbnailRequests.delete(cacheKey);
+  });
+
+  thumbnailRequests.set(cacheKey, request);
+  return request;
+}
+
+/**
+ * 将缩略图应用到指定的预览单元格。
+ * @param {HTMLElement} previewElement - 预览容器
+ * @param {string} thumbnailUrl - 缩略图对象 URL
+ * @param {string} filename - 文件名
+ */
+function applyThumbnailToCell(previewElement, thumbnailUrl, filename) {
+  const imageElement = document.createElement('img');
+  imageElement.className = 'file-preview-image';
+  imageElement.src = thumbnailUrl;
+  imageElement.alt = filename;
+  imageElement.loading = 'lazy';
+
+  previewElement.innerHTML = '';
+  previewElement.appendChild(imageElement);
+  previewElement.title = filename;
+}
+
+/**
+ * 将预览返回的二进制内容转换为本地对象 URL。
+ * @param {{content: Buffer|Uint8Array|ArrayBuffer|Object, metadata?: Object}} previewData - 预览数据
+ * @returns {string} 对象 URL
+ */
+function createThumbnailObjectUrl(previewData) {
+  const buffer = normalizeBinaryContent(previewData?.content);
+  if (!buffer) {
+    return '';
+  }
+
+  const mimeType = previewData?.metadata?.contentType || 'image/*';
+  return URL.createObjectURL(new Blob([buffer], { type: mimeType }));
+}
+
+/**
+ * 将不同格式的二进制内容统一转换为 Buffer。
+ * @param {Buffer|Uint8Array|ArrayBuffer|Object|null} content - 二进制内容
+ * @returns {Buffer|null} 标准化后的 Buffer
+ */
+function normalizeBinaryContent(content) {
+  if (!content) {
+    return null;
+  }
+
+  if (Buffer.isBuffer(content)) {
+    return content;
+  }
+
+  if (content instanceof Uint8Array) {
+    return Buffer.from(content);
+  }
+
+  if (content instanceof ArrayBuffer) {
+    return Buffer.from(content);
+  }
+
+  if (content.type === 'Buffer' && Array.isArray(content.data)) {
+    return Buffer.from(content.data);
+  }
+
+  return null;
+}
+
+/**
+ * 生成缩略图缓存键，避免同名文件更新后继续复用旧缩略图。
+ * @param {Object} objectInfo - 对象信息
+ * @returns {string} 缓存键
+ */
+function getThumbnailCacheKey(objectInfo) {
+  const modifiedAt = objectInfo?.lastModified ? new Date(objectInfo.lastModified).getTime() : '';
+  return `${objectInfo?.key || ''}::${objectInfo?.size || 0}::${modifiedAt}`;
+}
+
+/**
+ * 清理已不在当前列表中的缩略图对象 URL，避免内存泄漏。
+ * @param {Array<Object>} objects - 当前对象列表
+ */
+function cleanupStaleThumbnailObjectUrls(objects) {
+  const validCacheKeys = new Set((objects || []).map(getThumbnailCacheKey));
+
+  Array.from(thumbnailObjectUrls.keys()).forEach((cacheKey) => {
+    if (!validCacheKeys.has(cacheKey)) {
+      URL.revokeObjectURL(thumbnailObjectUrls.get(cacheKey));
+      thumbnailObjectUrls.delete(cacheKey);
+    }
+  });
+
+  Array.from(thumbnailRequests.keys()).forEach((cacheKey) => {
+    if (!validCacheKeys.has(cacheKey)) {
+      thumbnailRequests.delete(cacheKey);
+    }
+  });
+}
+
+/**
+ * 页面关闭时释放全部缩略图对象 URL。
+ */
+function cleanupAllThumbnailObjectUrls() {
+  Array.from(thumbnailObjectUrls.values()).forEach((thumbnailUrl) => {
+    URL.revokeObjectURL(thumbnailUrl);
+  });
+
+  thumbnailObjectUrls.clear();
+  thumbnailRequests.clear();
 }
 
 /**

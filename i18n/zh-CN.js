@@ -19,7 +19,7 @@ var UI_TEXT = {
   refreshButton: '刷新',
   
   // ==================== Table Column Headers ====================
-  columnIcon: '图标',
+  columnIcon: '预览',
   columnName: '文件名',
   columnSize: '大小',
   columnModified: '修改时间',
