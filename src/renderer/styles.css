@@ -74,6 +74,34 @@ body {
   margin: 0 5px;
 }
 
+.bucket-switch-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 0 2px;
+}
+
+.bucket-current-label {
+  max-width: 140px;
+  padding: 5px 10px;
+  border: 1px solid #d9e2ec;
+  border-radius: 999px;
+  background-color: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bucket-switch-select {
+  width: 92px;
+  min-width: 92px;
+  padding: 6px 24px 6px 10px;
+  font-size: 12px;
+}
+
 /* ==================== 搜索框样式 ==================== */
 .search-container {
   display: flex;
@@ -241,6 +269,12 @@ body {
   transform: translate(-50%, -50%);
   text-align: center;
   z-index: 100;
+}
+
+.loading-indicator p {
+  color: #475569;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .spinner {
@@ -691,6 +725,19 @@ body {
   
   .search-input {
     width: 150px;
+  }
+
+  .bucket-switch-container {
+    max-width: 210px;
+  }
+
+  .bucket-current-label {
+    max-width: 110px;
+  }
+
+  .bucket-switch-select {
+    width: 84px;
+    min-width: 84px;
   }
 }
 

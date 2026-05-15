@@ -17,6 +17,18 @@ const electronAPI = {
     if (!result.success) throw result.error;
     return result.data;
   },
+
+  syncBucketState: async (payload = {}) => {
+    const result = await ipcRenderer.invoke('settings:syncBucketState', payload);
+    if (!result.success) throw result.error;
+    return result.data;
+  },
+
+  setCurrentBucket: async (bucket) => {
+    const result = await ipcRenderer.invoke('settings:setCurrentBucket', bucket);
+    if (!result.success) throw result.error;
+    return result.data;
+  },
   
   selectFile: async () => {
     return await ipcRenderer.invoke('dialog:openFile');
@@ -136,6 +148,8 @@ const elements = {
   btnPreview: document.getElementById('btn-preview'),
   btnDelete: document.getElementById('btn-delete'),
   btnRefresh: document.getElementById('btn-refresh'),
+  bucketSwitch: document.getElementById('bucket-switch'),
+  bucketCurrentLabel: document.querySelector('.bucket-switch-container .filter-label'),
   searchInput: document.getElementById('search-input'),
   btnClearSearch: document.getElementById('btn-clear-search'),
   filterType: document.getElementById('filter-type'),
@@ -149,6 +163,7 @@ const elements = {
   statusText: document.getElementById('status-text'),
   objectCount: document.getElementById('object-count'),
   loading: document.getElementById('loading'),
+  loadingText: document.querySelector('#loading p'),
   emptyState: document.getElementById('empty-state'),
   contextMenu: document.getElementById('context-menu'),
   progressOverlay: document.getElementById('progress-overlay'),
@@ -169,6 +184,10 @@ const state = {
   filteredObjects: [], // 过滤后的对象列表
   selectedObjects: new Set(),
   isLoading: false,
+  isSyncingBucketState: false,
+  bucketState: null,
+  buckets: [],
+  currentBucket: '',
   currentSort: { column: 'name', direction: 'asc' },
   searchTerm: '', // 当前搜索词
   filterType: 'all', // 当前文件类型筛选
@@ -224,6 +243,9 @@ function init() {
   elements.btnPreview.addEventListener('click', handlePreview);
   elements.btnDelete.addEventListener('click', handleDelete);
   elements.btnRefresh.addEventListener('click', handleRefresh);
+  if (elements.bucketSwitch) {
+    elements.bucketSwitch.addEventListener('change', handleBucketSwitchChange);
+  }
   
   // 绑定设置按钮事件
   const btnSettings = document.getElementById('btn-settings');
@@ -273,7 +295,7 @@ function init() {
   window.addEventListener('beforeunload', cleanupAllThumbnailObjectUrls);
   
   // 加载对象列表
-  loadObjectList();
+  loadObjectList({ syncBucketStateFirst: true });
 }
 
 /**
@@ -345,6 +367,116 @@ function updateStatus(text) {
 }
 
 /**
+ * 更新首页全局加载提示文案。
+ * @param {string} text - 当前加载动作说明
+ */
+function updateLoadingText(text) {
+  if (elements.loadingText) {
+    elements.loadingText.textContent = text || UI_TEXT.statusLoading || '正在加载...';
+  }
+
+}
+
+/**
+ * 更新首页当前存储桶展示文案。
+ * @param {string} bucketName - 当前存储桶名称
+ * @param {boolean} isBusy - 是否处于同步或切换中
+ */
+function updateBucketCurrentLabel(bucketName, isBusy = false) {
+  if (!elements.bucketCurrentLabel) {
+    return;
+  }
+
+  elements.bucketCurrentLabel.classList.add('bucket-current-label');
+  if (isBusy) {
+    const busyText = bucketName ? `当前桶：${bucketName}` : '存储桶处理中...';
+    elements.bucketCurrentLabel.textContent = busyText;
+    elements.bucketCurrentLabel.title = busyText;
+    return;
+  }
+
+  const labelText = bucketName ? `当前桶：${bucketName}` : '点击切换';
+  elements.bucketCurrentLabel.textContent = labelText;
+  elements.bucketCurrentLabel.title = labelText;
+}
+
+/**
+ * 渲染首页桶切换下拉框。
+ */
+function renderBucketSwitch() {
+  if (!elements.bucketSwitch) {
+    return;
+  }
+
+  elements.bucketSwitch.innerHTML = '';
+
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = UI_TEXT.bucketSelectPlaceholder || '请选择存储桶';
+  elements.bucketSwitch.appendChild(defaultOption);
+  defaultOption.textContent = state.isSyncingBucketState ? '正在同步...' : '点击切换';
+
+  state.buckets.forEach((bucket) => {
+    const option = document.createElement('option');
+    option.value = bucket.name;
+    option.textContent = bucket.name;
+    if (bucket.name === state.currentBucket) {
+      option.selected = true;
+    }
+    elements.bucketSwitch.appendChild(option);
+  });
+
+  elements.bucketSwitch.value = state.currentBucket || state.buckets[0]?.name || '';
+  elements.bucketSwitch.disabled = state.isSyncingBucketState || state.buckets.length === 0;
+  elements.bucketSwitch.title = state.isSyncingBucketState ? '正在切换存储桶...' : '点击选择并切换存储桶';
+  updateBucketCurrentLabel(state.currentBucket, state.isSyncingBucketState);
+}
+
+/**
+ * 同步远端桶状态并更新首页切桶数据。
+ * @param {Object} options - 同步选项
+ * @param {string} options.bucket - 指定要切换的桶名
+ * @returns {Promise<Object>} 同步结果
+ */
+async function syncBucketState(options = {}) {
+  const {
+    statusText = '正在同步远端存储桶...',
+    loadingText = statusText,
+    ...payload
+  } = options;
+  const shouldManageLoading = !state.isLoading;
+
+  if (state.isSyncingBucketState) {
+    return state.bucketState;
+  }
+
+  updateStatus(statusText);
+  if (shouldManageLoading) {
+    showLoading(loadingText);
+  } else {
+    updateLoadingText(loadingText);
+  }
+
+  state.isSyncingBucketState = true;
+  renderBucketSwitch();
+
+  try {
+    const bucketState = await window.electronAPI.syncBucketState(payload);
+    state.bucketState = bucketState;
+    state.buckets = Array.isArray(bucketState?.buckets) ? bucketState.buckets : [];
+    state.currentBucket = bucketState?.currentBucket || '';
+    renderBucketSwitch();
+    return bucketState;
+  } finally {
+    state.isSyncingBucketState = false;
+    renderBucketSwitch();
+    if (shouldManageLoading) {
+      hideLoading();
+    }
+  }
+}
+
+/**
  * 更新对象计数
  */
 function updateObjectCount(count) {
@@ -355,8 +487,9 @@ function updateObjectCount(count) {
 /**
  * 显示加载指示器
  */
-function showLoading() {
+function showLoading(message = '') {
   state.isLoading = true;
+  updateLoadingText(message);
   elements.loading.style.display = 'block';
   elements.objectListContainer.style.opacity = '0.5';
 }
@@ -368,6 +501,7 @@ function hideLoading() {
   state.isLoading = false;
   elements.loading.style.display = 'none';
   elements.objectListContainer.style.opacity = '1';
+  updateLoadingText(UI_TEXT.statusLoading || '正在加载...');
 }
 
 /**
@@ -615,6 +749,7 @@ function hideProgress() {
  * 显示通知
  */
 function showNotification(message, type = 'info') {
+  hideLoading();
   const notification = document.createElement('div');
   notification.className = `notification ${type}`;
   notification.textContent = message;
@@ -637,8 +772,16 @@ function shouldSuppressInitialStorageListError(error) {
   return !state.hasCompletedInitialListLoad && error?.code === 'SERVICE_NOT_READY';
 }
 
-async function loadObjectList() {
-  showLoading();
+async function loadObjectList(options = {}) {
+  const normalizedOptions = {
+    loadingText: UI_TEXT.statusLoading || '正在加载...',
+    syncStatusText: '正在同步远端数据...',
+    listStatusText: '正在加载对象列表...',
+    ...options
+  };
+  const { syncBucketStateFirst = false, bucket = '' } = normalizedOptions;
+  showLoading(normalizedOptions.loadingText);
+  updateStatus(normalizedOptions.loadingText);
   updateStatus(UI_TEXT.statusLoading || '正在加载...');
   
   // 清除选择状态
@@ -668,7 +811,30 @@ async function loadObjectList() {
   }
   
   try {
+    if (syncBucketStateFirst) {
+      updateStatus(UI_TEXT.bucketLoadingList || '正在加载存储桶列表...');
+      updateStatus(normalizedOptions.syncStatusText);
+      updateLoadingText(normalizedOptions.syncStatusText);
+      const syncedBucketState = await syncBucketState({
+        ...(bucket ? { bucket } : {}),
+        statusText: normalizedOptions.syncStatusText,
+        loadingText: normalizedOptions.syncStatusText
+      });
+      if (!syncedBucketState?.currentBucket) {
+        state.objects = [];
+        state.filteredObjects = [];
+        cleanupStaleThumbnailObjectUrls(state.objects);
+        renderObjectList();
+        updateObjectCount(0);
+        updateStatus(UI_TEXT.statusReady || '就绪');
+        showEmptyState();
+        return;
+      }
+    }
+
     // 调用 IPC 获取对象列表
+    updateStatus(normalizedOptions.listStatusText);
+    updateLoadingText(normalizedOptions.listStatusText);
     const objects = await window.electronAPI.listObjects();
     state.objects = objects || [];
     cleanupStaleThumbnailObjectUrls(state.objects);
@@ -681,6 +847,9 @@ async function loadObjectList() {
       showEmptyState();
     }
   } catch (error) {
+    state.isSyncingBucketState = false;
+    renderBucketSwitch();
+    hideLoading();
     console.error('加载对象列表失败:', error);
 
     if (shouldSuppressInitialStorageListError(error)) {
@@ -1987,8 +2156,52 @@ async function handleBatchDelete(objects) {
  * 处理刷新按钮点击
  */
 async function handleRefresh() {
-  await loadObjectList();
+  updateStatus('正在同步远端数据...');
+  updateLoadingText('正在同步远端数据...');
+  await loadObjectList({
+    syncBucketStateFirst: true,
+    loadingText: '正在刷新列表...',
+    syncStatusText: '正在同步远端数据...',
+    listStatusText: '正在重新加载对象列表...'
+  });
   showNotification(UI_TEXT.refreshSuccess || '列表已刷新', 'success');
+}
+
+/**
+ * 处理首页桶切换。
+ * @param {Event} event - 切换事件
+ */
+async function handleBucketSwitchChange(event) {
+  const bucket = String(event.target?.value || '').trim();
+  if (!bucket || bucket === state.currentBucket) {
+    return;
+  }
+
+  state.isSyncingBucketState = true;
+  renderBucketSwitch();
+  try {
+    updateStatus('正在切换存储桶...');
+    showLoading('正在切换存储桶...');
+    const bucketState = await window.electronAPI.setCurrentBucket(bucket);
+    state.bucketState = bucketState;
+    state.buckets = Array.isArray(bucketState?.buckets) ? bucketState.buckets : state.buckets;
+    state.currentBucket = bucketState?.currentBucket || bucket;
+    renderBucketSwitch();
+    await loadObjectList({
+      loadingText: '正在加载新存储桶对象...',
+      listStatusText: '正在加载新存储桶对象...'
+    });
+
+    const template = UI_TEXT.bucketSwitchSuccess || '已切换到存储桶: {bucket}';
+    state.isSyncingBucketState = false;
+    renderBucketSwitch();
+    showNotification(template.replace('{bucket}', state.currentBucket), 'success');
+    hideLoading();
+  } catch (error) {
+    console.error('切换存储桶失败:', error);
+    renderBucketSwitch();
+    showNotification(error.userMessage || UI_TEXT.bucketSwitchFailed || '切换存储桶失败', 'error');
+  }
 }
 
 /**

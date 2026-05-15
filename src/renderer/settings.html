@@ -381,6 +381,106 @@
       color: #888;
       margin-top: 4px;
     }
+
+    .readonly-input {
+      background-color: #f7f7f7;
+      color: #666;
+    }
+
+    .inline-field-group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .custom-domain-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .custom-domain-item {
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      padding: 12px;
+      background-color: #fafafa;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .custom-domain-item:hover {
+      border-color: #90caf9;
+      background-color: #f4f9ff;
+    }
+
+    .custom-domain-item.selected {
+      border-color: #2196f3;
+      background-color: #e3f2fd;
+    }
+
+    .custom-domain-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .custom-domain-meta {
+      margin-top: 6px;
+      font-size: 12px;
+      color: #777;
+      line-height: 1.6;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .status-pill.enabled {
+      background-color: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .status-pill.disabled {
+      background-color: #ffebee;
+      color: #c62828;
+    }
+
+    .empty-inline-tip {
+      padding: 12px;
+      border: 1px dashed #ddd;
+      border-radius: 6px;
+      color: #888;
+      font-size: 13px;
+      background-color: #fcfcfc;
+    }
+
+    .form-textarea {
+      width: 100%;
+      min-height: 96px;
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      outline: none;
+      resize: vertical;
+      transition: all 0.2s;
+    }
+
+    .form-textarea:focus {
+      border-color: #2196f3;
+      box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
+    }
   </style>
 </head>
 <body>
@@ -408,6 +508,17 @@
             <span class="status-dot"></span>
             <span id="credential-status-text" data-i18n="credentialsStatusNotConfigured">凭证未配置</span>
           </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cloudflare-account-id">Cloudflare Account ID</label>
+            <input type="text" id="cloudflare-account-id" class="form-input" placeholder="请输入 Cloudflare Account ID">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cloudflare-api-token">Cloudflare API Token</label>
+            <input type="password" id="cloudflare-api-token" class="form-input" placeholder="请输入 Cloudflare API Token">
+            <p class="help-text">用于存储桶、域名、r2.dev 等远端管理操作。</p>
+          </div>
           
           <!-- Access Key ID -->
           <div class="form-group">
@@ -424,6 +535,26 @@
                 <span id="toggle-secret-text" data-i18n="credentialsShowPassword">显示</span>
               </button>
             </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="cloudflare-jurisdiction">cf-r2-jurisdiction</label>
+            <select id="cloudflare-jurisdiction" class="form-select">
+              <option value="default">default</option>
+              <option value="eu">eu</option>
+              <option value="fedramp">fedramp</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="endpoint-url" data-i18n="endpointUrl">端点 URL</label>
+            <input type="text" id="endpoint-url" class="form-input readonly-input" readonly>
+            <p class="help-text">由 Cloudflare Account ID 自动生成。</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="endpoint-region" data-i18n="endpointRegion">区域</label>
+            <input type="text" id="endpoint-region" class="form-input readonly-input" value="auto" readonly>
           </div>
           
           <!-- Test connection button -->
@@ -456,13 +587,13 @@
       <div id="tab-bucket" class="tab-panel">
         <div class="settings-section">
           <h2 class="settings-section-title" data-i18n="bucketTitle">存储桶选择</h2>
-          <p class="settings-section-description" data-i18n="bucketDescription">选择要管理的 R2 存储桶。</p>
+          <p class="settings-section-description">进入页面和点击刷新都会先同步远端桶配置，再更新当前桶状态。</p>
 
           <!-- Bucket name -->
           <div class="form-group">
             <label class="form-label" for="bucket-name" data-i18n="bucketCurrent">当前存储桶</label>
-            <input type="text" id="bucket-name" class="form-input" placeholder="例如: picture">
-            <p class="help-text" data-i18n="bucketManualHint">可手动填写桶名，也可通过下方“刷新”后选择。</p>
+            <input type="text" id="bucket-name" class="form-input readonly-input" placeholder="例如: picture" readonly>
+            <p class="help-text">桶名创建后只读，不支持直接重命名。</p>
           </div>
           
           <!-- Bucket quick select -->
@@ -476,6 +607,22 @@
                 <span data-i18n="bucketRefreshList">刷新</span>
               </button>
             </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="bucket-created-at">创建时间</label>
+            <input type="text" id="bucket-created-at" class="form-input readonly-input" readonly>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="bucket-location-hint">位置提示</label>
+            <input type="text" id="bucket-location-hint" class="form-input readonly-input" readonly>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="public-url" data-i18n="publicUrl">当前公开访问地址</label>
+            <input type="text" id="public-url" class="form-input readonly-input" value="" readonly>
+            <p class="help-text">优先取启用的自定义域名，其次 r2.dev，最后回退到 S3 端点。</p>
           </div>
 
           <div class="form-group">
@@ -512,61 +659,77 @@
             <p class="help-text">删除操作会先清空桶内所有对象，再执行删除。</p>
           </div>
           
-          <!-- Bucket list -->
-          <div id="bucket-list-container" style="display: none;">
-            <div class="bucket-list" id="bucket-list">
-              <!-- Bucket items will be dynamically inserted here -->
-            </div>
-          </div>
-          
           <!-- Loading indicator -->
           <div id="bucket-loading" style="display: none; text-align: center; padding: 20px;">
             <span class="loading-spinner"></span>
             <span data-i18n="bucketLoadingList">正在加载存储桶列表...</span>
           </div>
         </div>
-        
-        <!-- Endpoint settings -->
+
         <div class="settings-section">
-          <h2 class="settings-section-title" data-i18n="endpointTitle">R2 端点</h2>
-          <p class="settings-section-description" data-i18n="endpointDescription">R2 API 端点配置（高级设置）</p>
-          
+          <h2 class="settings-section-title">r2.dev 公开访问</h2>
+          <p class="settings-section-description">用于管理当前桶的 Cloudflare 托管开发域名。</p>
+
           <div class="form-group">
-            <label class="form-label" for="endpoint-url" data-i18n="endpointUrl">端点 URL</label>
-            <input type="text" id="endpoint-url" class="form-input" value="https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com" placeholder="https://<accountid>.r2.cloudflarestorage.com">
-            <p class="help-text" data-i18n="endpointHelp">支持输入完整 URL；未填写协议时默认使用 https://</p>
+            <label class="form-label" for="managed-domain-url">r2.dev 地址</label>
+            <input type="text" id="managed-domain-url" class="form-input readonly-input" readonly>
           </div>
-          
-          <div class="form-group">
-            <label class="form-label" for="endpoint-region" data-i18n="endpointRegion">区域</label>
-            <input type="text" id="endpoint-region" class="form-input" value="auto">
-            <p class="help-text">R2 使用 "auto" 作为区域</p>
+
+          <div class="checkbox-group">
+            <input type="checkbox" id="managed-domain-enabled" class="checkbox-input">
+            <label for="managed-domain-enabled" class="checkbox-label">启用 r2.dev 公开访问</label>
+          </div>
+
+          <div class="btn-group">
+            <button id="btn-update-managed-domain" class="btn btn-secondary" type="button">更新 r2.dev 状态</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">自定义域名管理</h2>
+          <p class="settings-section-description">当前桶的自定义域名配置与远端保持一致，支持查询、绑定、修改、解绑。</p>
+
+          <div id="custom-domain-list" class="custom-domain-list">
+            <div class="empty-inline-tip">当前桶暂无自定义域名。</div>
+          </div>
+
+          <div class="form-group" style="margin-top: 16px;">
+            <label class="form-label" for="custom-domain">域名</label>
+            <input type="text" id="custom-domain" class="form-input" placeholder="files.example.com">
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="public-url" data-i18n="publicUrl">自定义域名</label>
-            <input type="text" id="public-url" class="form-input" value="" placeholder="https://cdn.example.com">
-            <p class="help-text" data-i18n="publicUrlHelp">可选。用于生成文件访问链接；不填写时使用 S3 地址。</p>
+            <label class="form-label" for="custom-domain-zone-id">Zone ID</label>
+            <input type="text" id="custom-domain-zone-id" class="form-input" placeholder="36ca64a6d92827b8...">
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="cloudflare-account-id">Cloudflare Account ID</label>
-            <input type="text" id="cloudflare-account-id" class="form-input" value="" placeholder="可为空，默认尝试从 endpoint 推断">
-          </div>
-
-          <div class="form-group">
-            <label class="form-label" for="cloudflare-api-token">Cloudflare API Token</label>
-            <input type="password" id="cloudflare-api-token" class="form-input" value="" placeholder="用于列桶/创建/编辑/删除桶">
-            <p class="help-text">需要具备 R2 桶管理权限。若 S3 Key 无法列桶，系统会自动回退到该 API。</p>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label" for="cloudflare-jurisdiction">cf-r2-jurisdiction</label>
-            <select id="cloudflare-jurisdiction" class="form-select">
-              <option value="default">default</option>
-              <option value="eu">eu</option>
-              <option value="fedramp">fedramp</option>
+            <label class="form-label" for="custom-domain-min-tls">最低 TLS 版本</label>
+            <select id="custom-domain-min-tls" class="form-select">
+              <option value="">默认</option>
+              <option value="1.0">1.0</option>
+              <option value="1.1">1.1</option>
+              <option value="1.2">1.2</option>
+              <option value="1.3">1.3</option>
             </select>
+          </div>
+
+          <div class="checkbox-group">
+            <input type="checkbox" id="custom-domain-enabled" class="checkbox-input" checked>
+            <label for="custom-domain-enabled" class="checkbox-label">启用公开访问</label>
+          </div>
+
+          <div class="form-group" style="margin-top: 16px;">
+            <label class="form-label" for="custom-domain-ciphers">TLS 加密套件</label>
+            <textarea id="custom-domain-ciphers" class="form-textarea" placeholder="每行一个，或使用逗号分隔"></textarea>
+            <p class="help-text">可选。支持每行一个值，也支持英文逗号分隔。</p>
+          </div>
+
+          <div class="btn-group">
+            <button id="btn-create-custom-domain" class="btn btn-primary" type="button">绑定域名</button>
+            <button id="btn-update-custom-domain" class="btn btn-secondary" type="button">更新域名</button>
+            <button id="btn-delete-custom-domain" class="btn btn-danger" type="button">解绑域名</button>
+            <button id="btn-reset-custom-domain" class="btn btn-secondary" type="button">清空表单</button>
           </div>
         </div>
       </div>

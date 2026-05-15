@@ -117,6 +117,66 @@ function normalizeJurisdiction(raw) {
 }
 
 /**
+ * 根据 Cloudflare Account ID 生成 R2 S3 兼容端点。
+ * @param {string} accountId - Cloudflare 账户 ID
+ * @param {string} fallbackEndpoint - 兼容旧配置时的回退端点
+ * @returns {string} 标准化后的端点地址
+ */
+function buildR2Endpoint(accountId, fallbackEndpoint = DEFAULT_R2_ENDPOINT) {
+  const normalizedAccountId = String(accountId || '').trim();
+  if (normalizedAccountId) {
+    return normalizeUrl(`https://${normalizedAccountId}.r2.cloudflarestorage.com`);
+  }
+  return normalizeUrl(fallbackEndpoint || DEFAULT_R2_ENDPOINT);
+}
+
+/**
+ * 解密或解码本地安全存储中的字符串。
+ * @param {string} encodedValue - Base64 编码后的安全值
+ * @returns {string} 解码后的明文
+ */
+function decodeStoredSecretValue(encodedValue) {
+  if (!encodedValue) {
+    return '';
+  }
+
+  const { safeStorage } = require('electron');
+  if (safeStorage.isEncryptionAvailable()) {
+    try {
+      return safeStorage.decryptString(Buffer.from(encodedValue, 'base64'));
+    } catch {
+      // 兼容旧版本未加密、仅做 Base64 编码的值。
+      return Buffer.from(encodedValue, 'base64').toString('utf8');
+    }
+  }
+
+  return Buffer.from(encodedValue, 'base64').toString('utf8');
+}
+
+/**
+ * 将敏感信息写入本地安全存储。
+ * @param {Object} store - electron-store 实例
+ * @param {string} key - 存储键
+ * @param {string} value - 原始值
+ * @param {boolean} encrypt - 是否启用系统加密
+ */
+function storeSecretValue(store, key, value, encrypt = true) {
+  const normalizedValue = String(value || '').trim();
+  if (!normalizedValue) {
+    store.delete(key);
+    return;
+  }
+
+  const { safeStorage } = require('electron');
+  if (encrypt !== false && safeStorage.isEncryptionAvailable()) {
+    store.set(key, safeStorage.encryptString(normalizedValue).toString('base64'));
+    return;
+  }
+
+  store.set(key, Buffer.from(normalizedValue, 'utf8').toString('base64'));
+}
+
+/**
  * Build Cloudflare API auth config from settings/env.
  * @param {Object} settings
  * @returns {{accountId: string, apiToken: string, jurisdiction: string}}
@@ -268,6 +328,237 @@ async function listBucketsViaCloudflareApi(apiConfig) {
 }
 
 /**
+ * 校验桶名是否合法。
+ * @param {string} bucketName - 存储桶名称
+ * @returns {boolean} 是否合法
+ */
+function isValidBucketName(bucketName) {
+  const normalizedBucketName = String(bucketName || '').trim();
+  return normalizedBucketName.length >= 3 &&
+    normalizedBucketName.length <= 64 &&
+    /^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(normalizedBucketName);
+}
+
+/**
+ * 标准化桶详情对象。
+ * @param {Object} rawBucket - Cloudflare API 返回的原始桶对象
+ * @returns {{name: string, creationDate: string|null, locationHint: string, storageClass: string}}
+ */
+function normalizeBucketInfo(rawBucket = {}) {
+  return {
+    name: String(rawBucket?.name || '').trim(),
+    creationDate: rawBucket?.creation_date || rawBucket?.creationDate || null,
+    locationHint: String(rawBucket?.locationHint || rawBucket?.location || '').trim(),
+    storageClass: String(rawBucket?.storageClass || rawBucket?.storage_class || '').trim()
+  };
+}
+
+/**
+ * 获取单个存储桶详情。
+ * @param {{accountId: string, apiToken: string, jurisdiction: string}} apiConfig - Cloudflare API 配置
+ * @param {string} bucketName - 存储桶名称
+ * @returns {Promise<{name: string, creationDate: string|null, locationHint: string, storageClass: string}>}
+ */
+async function getBucketDetailsViaCloudflareApi(apiConfig, bucketName) {
+  const result = await callCloudflareR2Api({
+    method: 'GET',
+    accountId: apiConfig.accountId,
+    apiToken: apiConfig.apiToken,
+    jurisdiction: apiConfig.jurisdiction,
+    path: `/r2/buckets/${encodeURIComponent(bucketName)}`
+  });
+
+  return normalizeBucketInfo(result || {});
+}
+
+/**
+ * 标准化自定义域名信息。
+ * @param {Object} rawDomain - Cloudflare API 返回的原始域名对象
+ * @returns {{domain: string, enabled: boolean, zoneId: string, minTLS: string, ciphers: string[], status: string}}
+ */
+function normalizeCustomDomainInfo(rawDomain = {}) {
+  return {
+    domain: String(rawDomain?.domain || rawDomain?.hostname || '').trim(),
+    enabled: Boolean(rawDomain?.enabled),
+    zoneId: String(rawDomain?.zoneId || rawDomain?.zone_id || '').trim(),
+    minTLS: String(rawDomain?.minTLS || rawDomain?.min_tls || '').trim(),
+    ciphers: Array.isArray(rawDomain?.ciphers) ? rawDomain.ciphers.filter(Boolean) : [],
+    status: String(rawDomain?.status || '').trim()
+  };
+}
+
+/**
+ * 获取桶的自定义域名列表。
+ * @param {{accountId: string, apiToken: string, jurisdiction: string}} apiConfig - Cloudflare API 配置
+ * @param {string} bucketName - 存储桶名称
+ * @returns {Promise<Array<{domain: string, enabled: boolean, zoneId: string, minTLS: string, ciphers: string[], status: string}>>}
+ */
+async function listCustomDomainsViaCloudflareApi(apiConfig, bucketName) {
+  const result = await callCloudflareR2Api({
+    method: 'GET',
+    accountId: apiConfig.accountId,
+    apiToken: apiConfig.apiToken,
+    jurisdiction: apiConfig.jurisdiction,
+    path: `/r2/buckets/${encodeURIComponent(bucketName)}/domains/custom`
+  });
+
+  const domainsRaw = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.domains)
+      ? result.domains
+      : [];
+
+  return domainsRaw
+    .map(item => normalizeCustomDomainInfo(item))
+    .filter(item => item.domain);
+}
+
+/**
+ * 获取桶的 r2.dev 域名配置。
+ * @param {{accountId: string, apiToken: string, jurisdiction: string}} apiConfig - Cloudflare API 配置
+ * @param {string} bucketName - 存储桶名称
+ * @returns {Promise<{enabled: boolean, domain: string, url: string}>}
+ */
+async function getManagedDomainViaCloudflareApi(apiConfig, bucketName) {
+  const result = await callCloudflareR2Api({
+    method: 'GET',
+    accountId: apiConfig.accountId,
+    apiToken: apiConfig.apiToken,
+    jurisdiction: apiConfig.jurisdiction,
+    path: `/r2/buckets/${encodeURIComponent(bucketName)}/domains/managed`
+  });
+
+  const domain = String(
+    result?.domain ||
+    result?.hostname ||
+    result?.uri ||
+    result?.url ||
+    result?.publicUrl ||
+    ''
+  ).trim();
+
+  return {
+    enabled: Boolean(result?.enabled),
+    domain,
+    url: domain
+  };
+}
+
+/**
+ * 解析当前桶的公开访问地址。
+ * @param {Object} params - 解析参数
+ * @param {Array<{domain: string, enabled: boolean}>} params.customDomains - 自定义域名列表
+ * @param {{enabled: boolean, domain: string, url: string}|null} params.managedDomain - r2.dev 配置
+ * @param {string} params.endpoint - S3 端点地址
+ * @returns {string} 当前桶的公开访问地址
+ */
+function resolveBucketPublicUrl(params = {}) {
+  const { customDomains = [], managedDomain = null, endpoint = DEFAULT_R2_ENDPOINT } = params;
+
+  const enabledCustomDomain = customDomains.find(item => item && item.enabled && item.domain);
+  if (enabledCustomDomain) {
+    try {
+      return normalizeUrl(enabledCustomDomain.domain);
+    } catch {
+      // ignore invalid custom domain and continue fallback
+    }
+  }
+
+  if (managedDomain && managedDomain.enabled) {
+    const managedDomainUrl = managedDomain.url || managedDomain.domain || '';
+    if (managedDomainUrl) {
+      try {
+        return normalizeUrl(managedDomainUrl);
+      } catch {
+        // ignore invalid managed domain and continue fallback
+      }
+    }
+  }
+
+  return normalizeUrl(endpoint);
+}
+
+/**
+ * 更新当前运行时存储服务。
+ * @param {Object} settings - 已保存的 R2 设置
+ * @param {Object|null} credentialsOverride - 可选的凭证覆盖
+ */
+function refreshStorageServiceWithSettings(settings, credentialsOverride = null) {
+  const credentials = credentialsOverride || resolveCredentials();
+  if (!CredentialManager.validateCredentials(credentials) || !settings?.bucket) {
+    storageService = null;
+    lastStartupCheckResult = {
+      ok: false,
+      status: CredentialManager.validateCredentials(credentials)
+        ? StartupCheckStatus.INVALID_SETTINGS
+        : StartupCheckStatus.MISSING_CREDENTIALS
+    };
+    return;
+  }
+
+  initializeStorageService(credentials, settings);
+}
+
+/**
+ * 从远端同步当前桶配置，并回写本地运行时设置。
+ * @param {Object} input - 输入配置
+ * @param {string} [input.bucket] - 指定要同步的桶名
+ * @returns {Promise<{buckets: Array, currentBucket: string, bucketDetail: Object|null, customDomains: Array, managedDomain: Object|null, publicUrl: string, endpoint: string, region: string, cloudflareAccountId: string, cloudflareJurisdiction: string}>}
+ */
+async function syncCurrentBucketFromRemote(input = {}) {
+  const baseSettings = resolveR2Settings(input, { requireBucket: false });
+  const apiConfig = resolveCloudflareApiConfig(baseSettings);
+  const buckets = await listBucketsViaCloudflareApi(apiConfig);
+
+  let currentBucket = String(input.bucket || baseSettings.bucket || '').trim();
+  if (!currentBucket || !buckets.some(item => item.name === currentBucket)) {
+    currentBucket = buckets[0]?.name || '';
+  }
+
+  if (!currentBucket) {
+    const savedSettings = saveR2Settings({
+      ...baseSettings,
+      bucket: '',
+      publicUrl: ''
+    });
+    refreshStorageServiceWithSettings(savedSettings);
+    return {
+      ...savedSettings,
+      buckets,
+      currentBucket: '',
+      bucketDetail: null,
+      customDomains: [],
+      managedDomain: null
+    };
+  }
+
+  const bucketDetail = await getBucketDetailsViaCloudflareApi(apiConfig, currentBucket);
+  const customDomains = await listCustomDomainsViaCloudflareApi(apiConfig, currentBucket);
+  const managedDomain = await getManagedDomainViaCloudflareApi(apiConfig, currentBucket);
+  const publicUrl = resolveBucketPublicUrl({
+    customDomains,
+    managedDomain,
+    endpoint: baseSettings.endpoint
+  });
+
+  const savedSettings = saveR2Settings({
+    ...baseSettings,
+    bucket: currentBucket,
+    publicUrl
+  });
+  refreshStorageServiceWithSettings(savedSettings);
+
+  return {
+    ...savedSettings,
+    buckets,
+    currentBucket,
+    bucketDetail,
+    customDomains,
+    managedDomain
+  };
+}
+
+/**
  * Delete all objects from a bucket via S3 API before bucket deletion.
  * @param {Object} params
  * @param {string} params.endpoint
@@ -343,48 +634,65 @@ async function clearBucketObjectsViaS3(params) {
 
 /**
  * 获取并标准化 R2 配置（endpoint/region/bucket/publicUrl）
- * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}}
+ * 说明：
+ * 1. endpoint 统一由 account id 自动生成
+ * 2. publicUrl 由远端同步后回写到当前桶运行时配置
+ * 3. 兼容旧版本中的 cfAccountId / cfApiToken / r2Endpoint 等字段
+ * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string, cloudflareAccountId: string, cloudflareApiToken: string, cloudflareJurisdiction: string}}
  */
 function getR2Settings() {
   try {
     const Store = require('electron-store');
-    const store = new Store({ name: 'settings' });
+    const settingsStore = new Store({ name: 'settings' });
+    const credentialsStore = new Store({ name: 'credentials' });
 
-    const endpointRaw = store.get('r2Endpoint', process.env.R2_ENDPOINT || DEFAULT_R2_ENDPOINT);
-    const regionRaw = store.get('r2Region', process.env.R2_REGION || DEFAULT_R2_REGION);
-    const bucketRaw = store.get('currentBucket', process.env.R2_BUCKET || DEFAULT_R2_BUCKET);
-    const publicUrlRaw = store.get('r2PublicUrl', process.env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_URL);
-    const cfAccountIdRaw = store.get(
-      'cfAccountId',
-      process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID || DEFAULT_CF_ACCOUNT_ID
+    const storedAccountId = settingsStore.get(
+      'accountId',
+      settingsStore.get(
+        'cfAccountId',
+        process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID || DEFAULT_CF_ACCOUNT_ID
+      )
     );
-    const cfApiTokenRaw = store.get(
-      'cfApiToken',
-      process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || DEFAULT_CF_API_TOKEN
-    );
-    const cfJurisdictionRaw = store.get(
+    const endpointFallback = settingsStore.get('r2Endpoint', process.env.R2_ENDPOINT || DEFAULT_R2_ENDPOINT);
+    const endpoint = buildR2Endpoint(storedAccountId, endpointFallback);
+
+    const regionRaw = settingsStore.get('r2Region', process.env.R2_REGION || DEFAULT_R2_REGION);
+    const bucketRaw = settingsStore.get('currentBucket', process.env.R2_BUCKET || DEFAULT_R2_BUCKET);
+    const publicUrlRaw = settingsStore.get('r2PublicUrl', process.env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_URL);
+    const cfJurisdictionRaw = settingsStore.get(
       'cfR2Jurisdiction',
-      process.env.CF_R2_JURISDICTION || DEFAULT_CF_R2_JURISDICTION
+      settingsStore.get('jurisdiction', process.env.CF_R2_JURISDICTION || DEFAULT_CF_R2_JURISDICTION)
     );
 
-    let endpoint;
     let publicUrl;
-    try {
-      endpoint = normalizeUrl(endpointRaw);
-    } catch {
-      endpoint = DEFAULT_R2_ENDPOINT;
-    }
-
     try {
       publicUrl = normalizeUrl(publicUrlRaw, { allowEmpty: true });
     } catch {
       publicUrl = DEFAULT_R2_PUBLIC_URL;
     }
 
+    let cloudflareApiToken = '';
+    try {
+      const storedApiToken = credentialsStore.get('apiToken');
+      if (storedApiToken) {
+        cloudflareApiToken = decodeStoredSecretValue(storedApiToken);
+      }
+    } catch {
+      cloudflareApiToken = '';
+    }
+
+    if (!cloudflareApiToken) {
+      cloudflareApiToken = String(
+        settingsStore.get(
+          'cfApiToken',
+          process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || DEFAULT_CF_API_TOKEN
+        ) || ''
+      ).trim();
+    }
+
     const region = String(regionRaw || DEFAULT_R2_REGION).trim() || DEFAULT_R2_REGION;
     const bucket = String(bucketRaw || DEFAULT_R2_BUCKET).trim() || DEFAULT_R2_BUCKET;
-    const cloudflareAccountId = String(cfAccountIdRaw || '').trim() || inferAccountIdFromEndpoint(endpoint);
-    const cloudflareApiToken = String(cfApiTokenRaw || '').trim();
+    const cloudflareAccountId = String(storedAccountId || '').trim() || inferAccountIdFromEndpoint(endpoint);
     const cloudflareJurisdiction = normalizeJurisdiction(cfJurisdictionRaw);
 
     return {
@@ -410,16 +718,17 @@ function getR2Settings() {
 }
 
 /**
- * 合并并标准化 R2 配置
+ * 合并并标准化 R2 配置。
  * @param {Object} input - 输入配置（可选）
- * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}}
+ * @param {Object} options - 选项
+ * @param {boolean} options.requireBucket - 是否要求 bucket 必填
+ * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string, cloudflareAccountId: string, cloudflareApiToken: string, cloudflareJurisdiction: string}}
  */
 function resolveR2Settings(input = {}, options = {}) {
   const { requireBucket = true } = options;
   const base = getR2Settings();
 
   const merged = {
-    endpoint: typeof input.endpoint === 'string' ? input.endpoint : base.endpoint,
     region: typeof input.region === 'string' ? input.region : base.region,
     bucket: typeof input.bucket === 'string' ? input.bucket : base.bucket,
     publicUrl: typeof input.publicUrl === 'string' ? input.publicUrl : base.publicUrl,
@@ -431,7 +740,8 @@ function resolveR2Settings(input = {}, options = {}) {
       typeof input.cloudflareJurisdiction === 'string' ? input.cloudflareJurisdiction : base.cloudflareJurisdiction
   };
 
-  const endpoint = normalizeUrl(merged.endpoint);
+  const cloudflareAccountId = String(merged.cloudflareAccountId || '').trim();
+  const endpoint = buildR2Endpoint(cloudflareAccountId, base.endpoint);
   const region = String(merged.region || DEFAULT_R2_REGION).trim() || DEFAULT_R2_REGION;
   const bucket = String(merged.bucket || '').trim();
   if (requireBucket && !bucket) {
@@ -445,63 +755,90 @@ function resolveR2Settings(input = {}, options = {}) {
     region,
     bucket,
     publicUrl,
-    cloudflareAccountId: String(merged.cloudflareAccountId || '').trim() || inferAccountIdFromEndpoint(endpoint),
+    cloudflareAccountId: cloudflareAccountId || inferAccountIdFromEndpoint(endpoint),
     cloudflareApiToken: String(merged.cloudflareApiToken || '').trim(),
     cloudflareJurisdiction: normalizeJurisdiction(merged.cloudflareJurisdiction)
   };
 }
 
 /**
- * 保存 R2 配置到本地设置
- * @param {Object} input - 输入配置（至少包含 endpoint/region/bucket/publicUrl 中的一部分）
- * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string}} 已保存配置
+ * 保存 R2 配置到本地设置。
+ * 说明：
+ * 1. 账号 ID、当前桶、运行时 publicUrl 存在 settings
+ * 2. API Token 作为敏感信息保存在 credentials
+ * @param {Object} input - 输入配置
+ * @returns {{endpoint: string, region: string, bucket: string, publicUrl: string, cloudflareAccountId: string, cloudflareApiToken: string, cloudflareJurisdiction: string}} 已保存配置
  */
 function saveR2Settings(input = {}) {
-  const settings = resolveR2Settings(input);
+  const settings = resolveR2Settings(input, { requireBucket: false });
   const Store = require('electron-store');
-  const store = new Store({ name: 'settings' });
+  const settingsStore = new Store({ name: 'settings' });
+  const credentialsStore = new Store({ name: 'credentials' });
 
-  store.set('r2Endpoint', settings.endpoint);
-  store.set('r2Region', settings.region);
-  store.set('currentBucket', settings.bucket);
-  store.set('r2PublicUrl', settings.publicUrl);
-  store.set('cfAccountId', settings.cloudflareAccountId || '');
-  store.set('cfApiToken', settings.cloudflareApiToken || '');
-  store.set('cfR2Jurisdiction', settings.cloudflareJurisdiction || DEFAULT_CF_R2_JURISDICTION);
+  settingsStore.set('accountId', settings.cloudflareAccountId || '');
+  settingsStore.set('r2Endpoint', settings.endpoint);
+  settingsStore.set('r2Region', settings.region);
+  settingsStore.set('currentBucket', settings.bucket || '');
+  settingsStore.set('r2PublicUrl', settings.publicUrl);
+  settingsStore.set('jurisdiction', settings.cloudflareJurisdiction || DEFAULT_CF_R2_JURISDICTION);
+  settingsStore.set('cfR2Jurisdiction', settings.cloudflareJurisdiction || DEFAULT_CF_R2_JURISDICTION);
+  settingsStore.set('cfAccountId', settings.cloudflareAccountId || '');
+
+  // 兼容历史字段：清理明文 API Token 存储，统一迁移至安全存储。
+  settingsStore.delete('cfApiToken');
+  storeSecretValue(credentialsStore, 'apiToken', settings.cloudflareApiToken || '');
 
   return settings;
 }
 
 /**
- * 从本地安全存储读取凭证
+ * 从本地安全存储读取凭证。
+ * 说明：
+ * 1. S3 密钥与 Cloudflare API Token 都存储在 credentials 仓库
+ * 2. account id 与 jurisdiction 由 settings 管理，便于生成 endpoint
  * @returns {Object|null} 凭证对象或 null
  */
 function loadStoredCredentials() {
   try {
-    const { safeStorage } = require('electron');
     const Store = require('electron-store');
-    const store = new Store({ name: 'credentials' });
+    const settingsStore = new Store({ name: 'settings' });
+    const credentialsStore = new Store({ name: 'credentials' });
 
-    const encryptedAccessKey = store.get('accessKeyId');
-    const encryptedSecretKey = store.get('secretAccessKey');
+    const encryptedAccessKey = credentialsStore.get('accessKeyId');
+    const encryptedSecretKey = credentialsStore.get('secretAccessKey');
+    const encryptedApiToken = credentialsStore.get('apiToken');
 
-    if (!encryptedAccessKey || !encryptedSecretKey) {
+    const accessKeyId = encryptedAccessKey ? decodeStoredSecretValue(encryptedAccessKey) : '';
+    const secretAccessKey = encryptedSecretKey ? decodeStoredSecretValue(encryptedSecretKey) : '';
+    const apiToken = encryptedApiToken ? decodeStoredSecretValue(encryptedApiToken) : '';
+    const accountId = String(
+      settingsStore.get(
+        'accountId',
+        settingsStore.get(
+          'cfAccountId',
+          process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID || DEFAULT_CF_ACCOUNT_ID
+        )
+      ) || ''
+    ).trim();
+    const jurisdiction = normalizeJurisdiction(
+      settingsStore.get(
+        'jurisdiction',
+        settingsStore.get('cfR2Jurisdiction', process.env.CF_R2_JURISDICTION || DEFAULT_CF_R2_JURISDICTION)
+      )
+    );
+
+    const s3Credentials = { accessKeyId, secretAccessKey };
+    if (!CredentialManager.validateCredentials(s3Credentials)) {
       return null;
     }
 
-    let accessKeyId;
-    let secretAccessKey;
-
-    if (safeStorage.isEncryptionAvailable()) {
-      accessKeyId = safeStorage.decryptString(Buffer.from(encryptedAccessKey, 'base64'));
-      secretAccessKey = safeStorage.decryptString(Buffer.from(encryptedSecretKey, 'base64'));
-    } else {
-      accessKeyId = Buffer.from(encryptedAccessKey, 'base64').toString('utf8');
-      secretAccessKey = Buffer.from(encryptedSecretKey, 'base64').toString('utf8');
-    }
-
-    const credentials = { accessKeyId, secretAccessKey };
-    return CredentialManager.validateCredentials(credentials) ? credentials : null;
+    return {
+      accessKeyId,
+      secretAccessKey,
+      apiToken,
+      accountId,
+      jurisdiction
+    };
   } catch (error) {
     ErrorLogger.logError(error, 'credentials:loadStored');
     return null;
@@ -509,7 +846,7 @@ function loadStoredCredentials() {
 }
 
 /**
- * 解析当前可用凭证（优先本地保存，其次环境变量）
+ * 解析当前可用凭证（优先本地保存，其次环境变量）。
  * @returns {Object|null} 凭证对象或 null
  */
 function resolveCredentials() {
@@ -520,7 +857,17 @@ function resolveCredentials() {
 
   try {
     const envCredentials = CredentialManager.loadCredentials();
-    return CredentialManager.validateCredentials(envCredentials) ? envCredentials : null;
+    if (!CredentialManager.validateCredentials(envCredentials)) {
+      return null;
+    }
+
+    const r2Settings = getR2Settings();
+    return {
+      ...envCredentials,
+      apiToken: String(r2Settings.cloudflareApiToken || '').trim(),
+      accountId: String(r2Settings.cloudflareAccountId || '').trim(),
+      jurisdiction: normalizeJurisdiction(r2Settings.cloudflareJurisdiction)
+    };
   } catch {
     return null;
   }
@@ -1726,7 +2073,6 @@ function registerSettingsHandlers() {
   ipcMain.handle('settings:saveR2Config', async (event, r2Config) => {
     try {
       const savedConfig = saveR2Settings({
-        endpoint: r2Config?.endpoint,
         region: r2Config?.region,
         bucket: r2Config?.bucket,
         publicUrl: r2Config?.publicUrl,
@@ -1734,21 +2080,7 @@ function registerSettingsHandlers() {
         cloudflareApiToken: r2Config?.cloudflareApiToken,
         cloudflareJurisdiction: r2Config?.cloudflareJurisdiction
       });
-
-      try {
-        const credentials = resolveCredentials();
-        if (credentials) {
-          initializeStorageService(credentials, savedConfig);
-        } else {
-          storageService = null;
-          lastStartupCheckResult = {
-            ok: false,
-            status: StartupCheckStatus.MISSING_CREDENTIALS
-          };
-        }
-      } catch (updateError) {
-        ErrorLogger.logError(updateError, 'settings:saveR2Config:update');
-      }
+      refreshStorageServiceWithSettings(savedConfig);
 
       return {
         success: true,
@@ -1775,7 +2107,14 @@ function registerSettingsHandlers() {
   // Handler for saving credentials
   ipcMain.handle('settings:saveCredentials', async (event, credentials) => {
     try {
-      const { accessKeyId, secretAccessKey, encrypt } = credentials;
+      const {
+        accessKeyId,
+        secretAccessKey,
+        apiToken,
+        accountId,
+        jurisdiction,
+        encrypt
+      } = credentials || {};
       
       if (!accessKeyId || !secretAccessKey) {
         return {
@@ -1798,30 +2137,44 @@ function registerSettingsHandlers() {
         };
       }
       
-      // Store credentials securely
-      const { safeStorage } = require('electron');
       const Store = require('electron-store');
-      const store = new Store({ name: 'credentials' });
-      
-      if (encrypt !== false && safeStorage.isEncryptionAvailable()) {
-        // Encrypt and store
-        const encryptedAccessKey = safeStorage.encryptString(accessKeyId).toString('base64');
-        const encryptedSecretKey = safeStorage.encryptString(secretAccessKey).toString('base64');
-        
-        store.set('accessKeyId', encryptedAccessKey);
-        store.set('secretAccessKey', encryptedSecretKey);
-      } else {
-        // Store with base64 encoding (less secure, but better than plain text)
-        store.set('accessKeyId', Buffer.from(accessKeyId).toString('base64'));
-        store.set('secretAccessKey', Buffer.from(secretAccessKey).toString('base64'));
+      const settingsStore = new Store({ name: 'settings' });
+      const credentialsStore = new Store({ name: 'credentials' });
+
+      // 同步保存账户维度配置，保证 endpoint 自动派生。
+      if (typeof accountId === 'string') {
+        settingsStore.set('accountId', accountId.trim());
+        settingsStore.set('cfAccountId', accountId.trim());
       }
-      
-      // Update the current storageService with new credentials
+      if (typeof jurisdiction === 'string') {
+        const normalizedJurisdiction = normalizeJurisdiction(jurisdiction);
+        settingsStore.set('jurisdiction', normalizedJurisdiction);
+        settingsStore.set('cfR2Jurisdiction', normalizedJurisdiction);
+      }
+
+      // 安全保存两套凭证。
+      storeSecretValue(credentialsStore, 'accessKeyId', accessKeyId, encrypt);
+      storeSecretValue(credentialsStore, 'secretAccessKey', secretAccessKey, encrypt);
+      storeSecretValue(credentialsStore, 'apiToken', apiToken || '', encrypt);
+
+      // 更新当前 storageService，避免刷新后才生效。
       try {
-        initializeStorageService({ accessKeyId, secretAccessKey }, getR2Settings());
+        const mergedSettings = saveR2Settings({
+          cloudflareAccountId: typeof accountId === 'string' ? accountId : undefined,
+          cloudflareApiToken: typeof apiToken === 'string' ? apiToken : undefined,
+          cloudflareJurisdiction: typeof jurisdiction === 'string' ? jurisdiction : undefined,
+          bucket: getR2Settings().bucket,
+          publicUrl: getR2Settings().publicUrl
+        });
+        refreshStorageServiceWithSettings(mergedSettings, {
+          accessKeyId,
+          secretAccessKey,
+          apiToken: String(apiToken || '').trim(),
+          accountId: String(accountId || mergedSettings.cloudflareAccountId || '').trim(),
+          jurisdiction: normalizeJurisdiction(jurisdiction || mergedSettings.cloudflareJurisdiction)
+        });
       } catch (updateError) {
         ErrorLogger.logError(updateError, 'settings:saveCredentials:update');
-        // Still return success since credentials were saved
       }
       
       return { success: true };
@@ -1841,9 +2194,15 @@ function registerSettingsHandlers() {
   ipcMain.handle('settings:clearCredentials', async (event) => {
     try {
       const Store = require('electron-store');
-      const store = new Store({ name: 'credentials' });
+      const credentialsStore = new Store({ name: 'credentials' });
+      const settingsStore = new Store({ name: 'settings' });
       
-      store.clear();
+      credentialsStore.clear();
+      settingsStore.delete('accountId');
+      settingsStore.delete('cfAccountId');
+      settingsStore.delete('jurisdiction');
+      settingsStore.delete('cfR2Jurisdiction');
+      settingsStore.delete('r2PublicUrl');
       storageService = null;
       lastStartupCheckResult = {
         ok: false,
@@ -1919,113 +2278,18 @@ function registerSettingsHandlers() {
   // Handler for listing buckets
   ipcMain.handle('settings:listBuckets', async (event, payload) => {
     try {
-      // Use S3Client to list buckets
-      const { S3Client, ListBucketsCommand } = require('@aws-sdk/client-s3');
-
-      const inputAccessKeyId = typeof payload?.accessKeyId === 'string' ? payload.accessKeyId.trim() : '';
-      const inputSecretAccessKey = typeof payload?.secretAccessKey === 'string' ? payload.secretAccessKey.trim() : '';
-
-      let credentials = null;
-      if (inputAccessKeyId && inputSecretAccessKey) {
-        credentials = {
-          accessKeyId: inputAccessKeyId,
-          secretAccessKey: inputSecretAccessKey
-        };
-      } else {
-        credentials = resolveCredentials();
-      }
-
-      if (!CredentialManager.validateCredentials(credentials)) {
-        return {
-          success: false,
-          error: {
-            message: 'Missing credentials',
-            userMessage: UI_TEXT.errorAuthDetail || '请先在设置中配置 R2 凭证'
-          }
-        };
-      }
-
       const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
-
-      const client = new S3Client({
-        endpoint: r2Settings.endpoint,
-        region: r2Settings.region,
-        credentials: {
-          accessKeyId: credentials.accessKeyId,
-          secretAccessKey: credentials.secretAccessKey
-        }
-      });
-      
-      const command = new ListBucketsCommand({});
-      const response = await client.send(command);
-      
-      const buckets = (response.Buckets || []).map(bucket => ({
-        name: bucket.Name,
-        creationDate: bucket.CreationDate
-      }));
-      
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const buckets = await listBucketsViaCloudflareApi(cfApiConfig);
       return { success: true, data: buckets };
     } catch (error) {
       ErrorLogger.logError(error, 'settings:listBuckets');
-
-      const isAccessDenied =
-        error?.name === 'AccessDenied' ||
-        error?.Code === 'AccessDenied' ||
-        error?.code === 'AccessDenied' ||
-        error?.$metadata?.httpStatusCode === 403;
-
-      if (isAccessDenied) {
-        const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
-        const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
-
-        if (cfApiConfig.accountId && cfApiConfig.apiToken) {
-          try {
-            const buckets = await listBucketsViaCloudflareApi(cfApiConfig);
-            return {
-              success: true,
-              data: buckets,
-              warning: {
-                code: 'LIST_FALLBACK_CLOUDFLARE_API',
-                userMessage: 'S3 密钥没有列桶权限，已自动使用 Cloudflare 管理 API 获取存储桶列表。'
-              }
-            };
-          } catch (cfError) {
-            ErrorLogger.logError(cfError, 'settings:listBuckets:cloudflareApiFallback');
-            return {
-              success: false,
-              error: {
-                message: cfError.message,
-                userMessage: cfError.userMessage || 'S3 列桶权限不足，且 Cloudflare API 获取失败，请检查 Account ID 与 API Token。'
-              }
-            };
-          }
-        }
-
-        const payloadBucket = typeof payload?.bucket === 'string' ? payload.bucket.trim() : '';
-        const storedBucket = (getR2Settings().bucket || '').trim();
-        const fallbackBucket = payloadBucket || storedBucket;
-        const fallbackBuckets = fallbackBucket ? [{ name: fallbackBucket, creationDate: null }] : [];
-
-        return {
-          success: true,
-          data: fallbackBuckets,
-          warning: {
-            code: 'ACCESS_DENIED',
-            userMessage: '当前 Access Key 没有列桶权限，已切换为手动桶名模式。可配置 Cloudflare Account ID 与 API Token 来获取完整桶列表。'
-          }
-        };
-      }
-
-      let userMessage = ErrorHandler.getUserMessage(error);
-      if (error.message === 'URL is required') {
-        userMessage = UI_TEXT.endpointRequired || '请填写 S3 地址（Endpoint）';
-      }
 
       return {
         success: false,
         error: {
           message: error.message,
-          userMessage: userMessage || UI_TEXT.bucketLoadFailed || '加载存储桶列表失败'
+          userMessage: error.userMessage || UI_TEXT.bucketLoadFailed || '加载存储桶列表失败'
         }
       };
     }
@@ -2045,25 +2309,8 @@ function registerSettingsHandlers() {
   // Handler for setting current bucket
   ipcMain.handle('settings:setCurrentBucket', async (event, bucket) => {
     try {
-      const savedConfig = saveR2Settings({ bucket });
-      
-      // Update the current storageService with new bucket
-      try {
-        const credentials = resolveCredentials();
-        if (credentials) {
-          initializeStorageService(credentials, savedConfig);
-        } else {
-          storageService = null;
-          lastStartupCheckResult = {
-            ok: false,
-            status: StartupCheckStatus.MISSING_CREDENTIALS
-          };
-        }
-      } catch (updateError) {
-        ErrorLogger.logError(updateError, 'settings:setCurrentBucket:update');
-      }
-      
-      return { success: true };
+      const syncResult = await syncCurrentBucketFromRemote({ bucket });
+      return { success: true, data: syncResult };
     } catch (error) {
       ErrorLogger.logError(error, 'settings:setCurrentBucket');
       return {
@@ -2095,7 +2342,7 @@ function registerSettingsHandlers() {
           }
         };
       }
-      if (!/^[a-z0-9-]{3,64}$/.test(bucketName)) {
+      if (!isValidBucketName(bucketName)) {
         return {
           success: false,
           error: {
@@ -2155,7 +2402,7 @@ function registerSettingsHandlers() {
           }
         };
       }
-      if (!/^[a-z0-9-]{3,64}$/.test(bucketName)) {
+      if (!isValidBucketName(bucketName)) {
         return {
           success: false,
           error: {
@@ -2218,7 +2465,7 @@ function registerSettingsHandlers() {
           }
         };
       }
-      if (!/^[a-z0-9-]{3,64}$/.test(bucketName)) {
+      if (!isValidBucketName(bucketName)) {
         return {
           success: false,
           error: {
@@ -2279,6 +2526,321 @@ function registerSettingsHandlers() {
         error: {
           message: error.message,
           userMessage: error.userMessage || '删除存储桶失败，请检查桶权限与 Cloudflare API 配置。'
+        }
+      };
+    }
+  });
+
+  // Handler for syncing current bucket configuration from remote
+  ipcMain.handle('settings:syncBucketState', async (event, payload) => {
+    try {
+      const data = await syncCurrentBucketFromRemote(payload || {});
+      return { success: true, data };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:syncBucketState');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || UI_TEXT.bucketLoadFailed || '同步存储桶配置失败'
+        }
+      };
+    }
+  });
+
+  // Handler for getting a bucket detail snapshot
+  ipcMain.handle('settings:getBucketDetail', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const data = await getBucketDetailsViaCloudflareApi(cfApiConfig, bucketName);
+      return { success: true, data };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:getBucketDetail');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '获取存储桶详情失败'
+        }
+      };
+    }
+  });
+
+  // Handler for listing custom domains of a bucket
+  ipcMain.handle('settings:listCustomDomains', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const data = await listCustomDomainsViaCloudflareApi(cfApiConfig, bucketName);
+      return { success: true, data };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:listCustomDomains');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '加载自定义域名失败'
+        }
+      };
+    }
+  });
+
+  // Handler for creating custom domain binding
+  ipcMain.handle('settings:createCustomDomain', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      const domain = String(payload?.domain || '').trim();
+      const zoneId = String(payload?.zoneId || '').trim();
+      const enabled = payload?.enabled !== false;
+      const minTLS = String(payload?.minTLS || '').trim();
+      const ciphers = Array.isArray(payload?.ciphers) ? payload.ciphers.filter(Boolean) : [];
+
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+      if (!domain || !zoneId) {
+        return {
+          success: false,
+          error: {
+            message: 'Domain and zoneId are required',
+            userMessage: '请填写完整的自定义域名和 Zone ID。'
+          }
+        };
+      }
+
+      const body = {
+        domain,
+        zoneId,
+        enabled
+      };
+      if (minTLS) {
+        body.minTLS = minTLS;
+      }
+      if (ciphers.length > 0) {
+        body.ciphers = ciphers;
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const result = await callCloudflareR2Api({
+        method: 'POST',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: `/r2/buckets/${encodeURIComponent(bucketName)}/domains/custom`,
+        body
+      });
+
+      return {
+        success: true,
+        data: normalizeCustomDomainInfo(result || body)
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:createCustomDomain');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '绑定自定义域名失败'
+        }
+      };
+    }
+  });
+
+  // Handler for updating custom domain binding
+  ipcMain.handle('settings:updateCustomDomain', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      const currentDomain = String(payload?.currentDomain || payload?.domain || '').trim();
+      const domain = String(payload?.domain || '').trim();
+      const zoneId = String(payload?.zoneId || '').trim();
+      const enabled = payload?.enabled !== false;
+      const minTLS = String(payload?.minTLS || '').trim();
+      const ciphers = Array.isArray(payload?.ciphers) ? payload.ciphers.filter(Boolean) : [];
+
+      if (!bucketName || !currentDomain || !domain || !zoneId) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name, domain and zoneId are required',
+            userMessage: '请填写完整的桶名、域名和 Zone ID。'
+          }
+        };
+      }
+
+      const body = {
+        domain,
+        zoneId,
+        enabled
+      };
+      if (minTLS) {
+        body.minTLS = minTLS;
+      }
+      if (ciphers.length > 0) {
+        body.ciphers = ciphers;
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const result = await callCloudflareR2Api({
+        method: 'PUT',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: `/r2/buckets/${encodeURIComponent(bucketName)}/domains/custom/${encodeURIComponent(currentDomain)}`,
+        body
+      });
+
+      return {
+        success: true,
+        data: normalizeCustomDomainInfo(result || body)
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:updateCustomDomain');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '更新自定义域名失败'
+        }
+      };
+    }
+  });
+
+  // Handler for deleting custom domain binding
+  ipcMain.handle('settings:deleteCustomDomain', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      const domain = String(payload?.domain || '').trim();
+
+      if (!bucketName || !domain) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name and domain are required',
+            userMessage: '请先选择桶并填写要删除的域名。'
+          }
+        };
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      await callCloudflareR2Api({
+        method: 'DELETE',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: `/r2/buckets/${encodeURIComponent(bucketName)}/domains/custom/${encodeURIComponent(domain)}`
+      });
+
+      return { success: true };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:deleteCustomDomain');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '删除自定义域名失败'
+        }
+      };
+    }
+  });
+
+  // Handler for getting r2.dev managed domain config
+  ipcMain.handle('settings:getManagedDomain', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const data = await getManagedDomainViaCloudflareApi(cfApiConfig, bucketName);
+      return { success: true, data };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:getManagedDomain');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '获取 r2.dev 配置失败'
+        }
+      };
+    }
+  });
+
+  // Handler for updating r2.dev managed domain config
+  ipcMain.handle('settings:updateManagedDomain', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const bucketName = String(payload?.bucketName || r2Settings.bucket || '').trim();
+      if (!bucketName) {
+        return {
+          success: false,
+          error: {
+            message: 'Bucket name is required',
+            userMessage: UI_TEXT.bucketRequired || '请填写桶名'
+          }
+        };
+      }
+
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      await callCloudflareR2Api({
+        method: 'PUT',
+        accountId: cfApiConfig.accountId,
+        apiToken: cfApiConfig.apiToken,
+        jurisdiction: cfApiConfig.jurisdiction,
+        path: `/r2/buckets/${encodeURIComponent(bucketName)}/domains/managed`,
+        body: {
+          enabled: Boolean(payload?.enabled)
+        }
+      });
+
+      const data = await getManagedDomainViaCloudflareApi(cfApiConfig, bucketName);
+      return { success: true, data };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:updateManagedDomain');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '更新 r2.dev 配置失败'
         }
       };
     }
