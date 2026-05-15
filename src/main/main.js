@@ -1556,15 +1556,15 @@ function registerIPCHandlers() {
     }
   });
 
-  // Handler for loading image thumbnail data
+  // Handler for loading media thumbnail data
   ipcMain.handle('storage:thumbnail', async (event, key) => {
     try {
       const activeStorageService = getStorageServiceOrThrow('preview');
       const previewData = await activeStorageService.previewFile(key);
       previewData.key = key;
 
-      if (previewData.type !== 'image') {
-        const error = new Error('Thumbnail preview is only supported for image files');
+      if (!['image', 'video'].includes(previewData.type)) {
+        const error = new Error('Thumbnail preview is only supported for image and video files');
         error.userMessage = UI_TEXT.previewNotSupported || '不支持预览此文件类型，请下载后查看';
         throw error;
       }

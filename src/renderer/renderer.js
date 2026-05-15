@@ -201,6 +201,7 @@ const FILE_TYPE_ICONS = {
 };
 
 const IMAGE_FILE_TYPES = new Set(FILE_TYPE_ICONS.image.types);
+const VIDEO_FILE_TYPES = new Set(FILE_TYPE_ICONS.video.types);
 const PREVIEWABLE_FILE_TYPES = new Set(['image', 'video', 'pdf']);
 const thumbnailObjectUrls = new Map();
 const thumbnailRequests = new Map();
@@ -751,7 +752,7 @@ function renderObjectList() {
       row.classList.add('selected');
     }
 
-    if (isImageFile(obj.key)) {
+    if (supportsListThumbnail(obj.key)) {
       const previewElement = row.querySelector('.file-preview');
       hydrateThumbnailCell(previewElement, obj);
     }
@@ -1119,7 +1120,7 @@ function getFileIcon(filename) {
  * @returns {string} 预览列 HTML
  */
 function renderFileCell(objectInfo, iconInfo) {
-  if (isImageFile(objectInfo.key)) {
+  if (supportsListThumbnail(objectInfo.key)) {
     return `
       <span class="file-preview" title="${escapeHtml(objectInfo.key)}">
         <span class="file-icon ${iconInfo.type} file-preview-fallback">${escapeHtml(iconInfo.icon)}</span>
@@ -1140,12 +1141,30 @@ function isImageFile(filename) {
 }
 
 /**
- * 为列表中的图片单元格异步加载缩略图。
+ * 判断文件是否为视频类型。
+ * @param {string} filename - 文件名
+ * @returns {boolean} 是否为视频
+ */
+function isVideoFile(filename) {
+  return VIDEO_FILE_TYPES.has(getFileExtension(filename).toLowerCase());
+}
+
+/**
+ * 判断文件是否支持列表缩略图。
+ * @param {string} filename - 文件名
+ * @returns {boolean} 是否支持列表缩略图
+ */
+function supportsListThumbnail(filename) {
+  return isImageFile(filename) || isVideoFile(filename);
+}
+
+/**
+ * 为列表中的媒体单元格异步加载缩略图。
  * @param {HTMLElement|null} previewElement - 预览容器
  * @param {Object} objectInfo - 对象信息
  */
 function hydrateThumbnailCell(previewElement, objectInfo) {
-  if (!previewElement || !objectInfo || !isImageFile(objectInfo.key)) {
+  if (!previewElement || !objectInfo || !supportsListThumbnail(objectInfo.key)) {
     return;
   }
 
@@ -1168,7 +1187,7 @@ function hydrateThumbnailCell(previewElement, objectInfo) {
 }
 
 /**
- * 获取图片缩略图对象 URL，并在内存中缓存。
+ * 获取媒体缩略图对象 URL，并在内存中缓存。
  * @param {Object} objectInfo - 对象信息
  * @returns {Promise<string>} 缩略图对象 URL
  */
@@ -1184,8 +1203,8 @@ function requestThumbnailObjectUrl(objectInfo) {
     return pendingRequest;
   }
 
-  const request = window.electronAPI.getThumbnail(objectInfo.key).then((previewData) => {
-    const thumbnailUrl = createThumbnailObjectUrl(previewData);
+  const request = window.electronAPI.getThumbnail(objectInfo.key).then(async (previewData) => {
+    const thumbnailUrl = await createThumbnailObjectUrl(previewData);
     if (thumbnailUrl) {
       thumbnailObjectUrls.set(cacheKey, thumbnailUrl);
     }
@@ -1221,17 +1240,102 @@ function applyThumbnailToCell(previewElement, thumbnailUrl, filename) {
 
 /**
  * 将预览返回的二进制内容转换为本地对象 URL。
+ * 视频文件会先提取一帧，再生成图片对象 URL。
  * @param {{content: Buffer|Uint8Array|ArrayBuffer|Object, metadata?: Object}} previewData - 预览数据
- * @returns {string} 对象 URL
+ * @returns {Promise<string>} 对象 URL
  */
-function createThumbnailObjectUrl(previewData) {
+async function createThumbnailObjectUrl(previewData) {
   const buffer = normalizeBinaryContent(previewData?.content);
   if (!buffer) {
     return '';
   }
 
-  const mimeType = previewData?.metadata?.contentType || 'image/*';
-  return URL.createObjectURL(new Blob([buffer], { type: mimeType }));
+  const mediaType = previewData?.type || '';
+  const mimeType = previewData?.metadata?.contentType || 'application/octet-stream';
+  const blob = new Blob([buffer], { type: mimeType });
+
+  if (mediaType === 'video') {
+    return await extractVideoFrameObjectUrl(blob);
+  }
+
+  return URL.createObjectURL(blob);
+}
+
+/**
+ * 从视频 Blob 中提取一帧，并生成图片对象 URL。
+ * @param {Blob} videoBlob - 视频 Blob
+ * @returns {Promise<string>} 视频帧对象 URL
+ */
+function extractVideoFrameObjectUrl(videoBlob) {
+  return new Promise((resolve) => {
+    const sourceUrl = URL.createObjectURL(videoBlob);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = 'anonymous';
+
+    let settled = false;
+    const cleanup = () => {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+      URL.revokeObjectURL(sourceUrl);
+    };
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      resolve(result || '');
+    };
+
+    video.onloadedmetadata = () => {
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      const targetTime = duration > 1 ? Math.min(1, Math.max(duration * 0.1, 0.1)) : 0;
+
+      const captureFrame = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth || 160;
+          canvas.height = video.videoHeight || 90;
+
+          const context = canvas.getContext('2d');
+          if (!context) {
+            finish('');
+            return;
+          }
+
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((frameBlob) => {
+            if (!frameBlob) {
+              finish('');
+              return;
+            }
+
+            finish(URL.createObjectURL(frameBlob));
+          }, 'image/jpeg', 0.82);
+        } catch (error) {
+          console.error('提取视频缩略帧失败:', error);
+          finish('');
+        }
+      };
+
+      video.onseeked = captureFrame;
+      try {
+        video.currentTime = targetTime;
+      } catch (error) {
+        captureFrame();
+      }
+    };
+
+    video.onerror = () => finish('');
+    video.src = sourceUrl;
+    video.load();
+  });
 }
 
 /**
