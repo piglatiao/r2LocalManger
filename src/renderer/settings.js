@@ -45,6 +45,7 @@ const electronAPI = {
   deleteCustomDomain: async (payload) => ipcRenderer.invoke('settings:deleteCustomDomain', payload),
   getManagedDomain: async (payload) => ipcRenderer.invoke('settings:getManagedDomain', payload),
   updateManagedDomain: async (payload) => ipcRenderer.invoke('settings:updateManagedDomain', payload),
+  listAvailableDomains: async (payload) => ipcRenderer.invoke('settings:listAvailableDomains', payload),
   confirm: async (message) => {
     const result = await ipcRenderer.invoke('dialog:confirm', message);
     return result.confirmed;
@@ -121,13 +122,16 @@ const state = {
     cloudflareJurisdiction: 'default'
   },
   buckets: [],
+  availableDomains: [],
   bucketDetail: null,
   customDomains: [],
   managedDomain: null,
   selectedDomain: '',
+  selectedZoneId: '',
   hasChanges: false,
   isTesting: false,
-  isLoadingBuckets: false
+  isLoadingBuckets: false,
+  isLoadingZones: false
 };
 
 function getInputValue(element, fallback = '') {
@@ -256,6 +260,116 @@ function renderBucketList() {
 }
 
 /**
+ * 根据域名查询当前账号下的 Zone 信息。
+ * @param {string} domain - 域名
+ * @returns {{id: string, name: string, status: string, accountId: string}|null}
+ */
+function findAvailableDomainByName(domain) {
+  const normalizedDomain = String(domain || '').trim().toLowerCase();
+  if (!normalizedDomain) {
+    return null;
+  }
+
+  const matchedDomains = state.availableDomains.filter(item => {
+    const zoneName = String(item?.name || '').trim().toLowerCase();
+    if (!zoneName) {
+      return false;
+    }
+    return normalizedDomain === zoneName || normalizedDomain.endsWith(`.${zoneName}`);
+  });
+
+  if (!matchedDomains.length) {
+    return null;
+  }
+
+  return matchedDomains.sort((left, right) => String(right.name || '').length - String(left.name || '').length)[0] || null;
+}
+
+/**
+ * 根据 Zone ID 查询可用域名信息。
+ * @param {string} zoneId - Zone ID
+ * @returns {{id: string, name: string, status: string, accountId: string}|null}
+ */
+function findAvailableDomainById(zoneId) {
+  const normalizedZoneId = String(zoneId || '').trim();
+  if (!normalizedZoneId) {
+    return null;
+  }
+
+  return state.availableDomains.find(item => String(item?.id || '').trim() === normalizedZoneId) || null;
+}
+
+/**
+ * 渲染可用域名下拉列表。
+ * 选项值直接使用 Zone ID，避免页面中继续暴露手工填写 Zone ID 的流程。
+ */
+function renderAvailableDomains() {
+  if (!elements.customDomainZoneId) {
+    return;
+  }
+
+  elements.customDomainZoneId.innerHTML = '';
+
+  const placeholderOption = document.createElement('option');
+  placeholderOption.value = '';
+  if (state.isLoadingZones) {
+    placeholderOption.textContent = '正在加载可用域名...';
+  } else if (state.availableDomains.length > 0) {
+    placeholderOption.textContent = '请选择可用域名';
+  } else {
+    placeholderOption.textContent = '暂无可用域名';
+  }
+  elements.customDomainZoneId.appendChild(placeholderOption);
+
+  state.availableDomains.forEach(item => {
+    const option = document.createElement('option');
+    option.value = item.id;
+    option.textContent = item.name;
+    option.dataset.domain = item.name;
+    option.title = item.id;
+    if (item.id === state.selectedZoneId) {
+      option.selected = true;
+    }
+    elements.customDomainZoneId.appendChild(option);
+  });
+
+  if (state.selectedZoneId && !state.availableDomains.some(item => item.id === state.selectedZoneId)) {
+    const fallbackOption = document.createElement('option');
+    fallbackOption.value = state.selectedZoneId;
+    fallbackOption.textContent = `当前已选 Zone ID: ${state.selectedZoneId}`;
+    fallbackOption.selected = true;
+    elements.customDomainZoneId.appendChild(fallbackOption);
+  }
+
+  elements.customDomainZoneId.disabled = state.isLoadingZones || (!state.availableDomains.length && !state.selectedZoneId);
+}
+
+/**
+ * 根据当前域名输入自动匹配可用域名列表，并同步 Zone 选择。
+ * @param {string} domain - 需要匹配的域名
+ */
+function syncZoneSelectionByDomain(domain) {
+  const matchedZone = findAvailableDomainByName(domain);
+  state.selectedZoneId = matchedZone?.id || '';
+  if (elements.customDomainZoneId) {
+    elements.customDomainZoneId.value = state.selectedZoneId;
+  }
+}
+
+/**
+ * 根据当前 Zone 选择同步域名输入。
+ * 用于从下拉列表直接选域名时自动回填域名输入框。
+ */
+function syncDomainInputByZoneSelection() {
+  const zoneId = getInputValue(elements.customDomainZoneId);
+  state.selectedZoneId = zoneId;
+  const matchedZone = state.availableDomains.find(item => item.id === zoneId) || null;
+  if (matchedZone && elements.customDomain && !getInputValue(elements.customDomain)) {
+    elements.customDomain.value = matchedZone.name;
+  }
+}
+
+/**
  * 渲染自定义域名列表。
  */
 function renderCustomDomains() {
@@ -277,6 +391,7 @@ function renderCustomDomains() {
     const wrapper = document.createElement('div');
     wrapper.className = `custom-domain-item${item.domain === state.selectedDomain ? ' selected' : ''}`;
     wrapper.dataset.domain = item.domain;
+    const matchedZone = findAvailableDomainById(item.zoneId);
 
     const title = document.createElement('div');
     title.className = 'custom-domain-title';
@@ -288,6 +403,7 @@ function renderCustomDomains() {
     const meta = document.createElement('div');
     meta.className = 'custom-domain-meta';
     meta.innerHTML = `
+      <div>所属域名: ${matchedZone?.name || '-'}</div>
       <div>Zone ID: ${item.zoneId || '-'}</div>
       <div>最低 TLS: ${item.minTLS || '默认'}</div>
       <div>状态: ${item.status || '未知'}</div>
@@ -309,12 +425,13 @@ function selectCustomDomain(domain) {
   state.selectedDomain = domain;
   const current = state.customDomains.find(item => item.domain === domain);
   if (!current) {
-    renderCustomDomains();
+    resetCustomDomainForm({ preserveZoneSelection: true });
     return;
   }
 
   if (elements.customDomain) elements.customDomain.value = current.domain || '';
-  if (elements.customDomainZoneId) elements.customDomainZoneId.value = current.zoneId || '';
+  state.selectedZoneId = current.zoneId || '';
+  if (elements.customDomainZoneId) elements.customDomainZoneId.value = state.selectedZoneId;
   if (elements.customDomainMinTls) elements.customDomainMinTls.value = current.minTLS || '';
   if (elements.customDomainEnabled) elements.customDomainEnabled.checked = Boolean(current.enabled);
   if (elements.customDomainCiphers) {
@@ -327,14 +444,19 @@ function selectCustomDomain(domain) {
 /**
  * 清空自定义域名编辑表单。
  */
-function resetCustomDomainForm() {
+function resetCustomDomainForm(options = {}) {
+  const { preserveZoneSelection = false } = options;
   state.selectedDomain = '';
   if (elements.customDomain) elements.customDomain.value = '';
-  if (elements.customDomainZoneId) elements.customDomainZoneId.value = '';
   if (elements.customDomainMinTls) elements.customDomainMinTls.value = '';
   if (elements.customDomainEnabled) elements.customDomainEnabled.checked = true;
   if (elements.customDomainCiphers) elements.customDomainCiphers.value = '';
+  if (!preserveZoneSelection) {
+    state.selectedZoneId = '';
+    if (elements.customDomainZoneId) elements.customDomainZoneId.value = '';
+  }
   renderCustomDomains();
+  renderAvailableDomains();
 }
 
 /**
@@ -342,6 +464,7 @@ function resetCustomDomainForm() {
  * @param {Object} syncState - 同步结果
  */
 function applySyncedBucketState(syncState) {
+  const previousBucket = state.r2Config.bucket;
   state.buckets = Array.isArray(syncState?.buckets) ? syncState.buckets : [];
   state.r2Config.bucket = syncState?.currentBucket || '';
   state.r2Config.publicUrl = syncState?.publicUrl || '';
@@ -352,6 +475,11 @@ function applySyncedBucketState(syncState) {
   state.bucketDetail = syncState?.bucketDetail || null;
   state.customDomains = Array.isArray(syncState?.customDomains) ? syncState.customDomains : [];
   state.managedDomain = syncState?.managedDomain || null;
+
+  if (previousBucket && previousBucket !== state.r2Config.bucket) {
+    state.selectedDomain = '';
+    state.selectedZoneId = '';
+  }
 
   if (elements.bucketName) {
     elements.bucketName.value = state.r2Config.bucket;
@@ -379,6 +507,8 @@ function applySyncedBucketState(syncState) {
   renderCustomDomains();
   if (state.selectedDomain) {
     selectCustomDomain(state.selectedDomain);
+  } else {
+    resetCustomDomainForm({ preserveZoneSelection: true });
   }
 }
 
@@ -469,6 +599,15 @@ function handleCredentialInput() {
   state.credentials.jurisdiction = getInputValue(elements.cloudflareJurisdiction, 'default') || 'default';
   updateDerivedEndpoint();
   state.hasChanges = true;
+
+  const accountChanged =
+    state.credentials.accountId !== state.r2Config.cloudflareAccountId ||
+    state.credentials.apiToken !== state.r2Config.cloudflareApiToken;
+  if (accountChanged) {
+    state.availableDomains = [];
+    state.selectedZoneId = '';
+    renderAvailableDomains();
+  }
 
   const hasCredentials = state.credentials.accountId &&
     state.credentials.apiToken &&
@@ -723,11 +862,14 @@ async function handleUpdateManagedDomain() {
 }
 
 function buildCustomDomainPayload() {
+  const domain = getInputValue(elements.customDomain);
+  syncZoneSelectionByDomain(domain);
+
   return {
     ...getSettingsPayload(),
     bucketName: state.r2Config.bucket,
-    domain: getInputValue(elements.customDomain),
-    zoneId: getInputValue(elements.customDomainZoneId),
+    domain,
+    zoneId: state.selectedZoneId || getInputValue(elements.customDomainZoneId),
     enabled: Boolean(elements.customDomainEnabled?.checked),
     minTLS: getInputValue(elements.customDomainMinTls),
     ciphers: parseCipherList(getInputValue(elements.customDomainCiphers))
@@ -740,8 +882,18 @@ async function handleCreateCustomDomain() {
     return;
   }
 
-	  setBucketLoadingState(true, '正在绑定自定义域名...');
-	  const result = await electronAPI.createCustomDomain(buildCustomDomainPayload());
+  const payload = buildCustomDomainPayload();
+  if (!payload.domain) {
+    showNotification('请先填写要绑定的完整域名。', 'warning');
+    return;
+  }
+  if (!payload.zoneId) {
+    showNotification('请选择当前账号下可用的域名，系统才能自动匹配 Zone。', 'warning');
+    return;
+  }
+
+  setBucketLoadingState(true, '正在绑定自定义域名...');
+  const result = await electronAPI.createCustomDomain(payload);
   if (!result.success) {
     showNotification(result.error?.userMessage || '绑定自定义域名失败', 'error');
     return;
@@ -758,9 +910,19 @@ async function handleUpdateCustomDomain() {
     return;
   }
 
-	  setBucketLoadingState(true, '正在更新自定义域名配置...');
-	  const result = await electronAPI.updateCustomDomain({
-    ...buildCustomDomainPayload(),
+  const payload = buildCustomDomainPayload();
+  if (!payload.domain) {
+    showNotification('请先填写要更新的完整域名。', 'warning');
+    return;
+  }
+  if (!payload.zoneId) {
+    showNotification('请选择当前账号下可用的域名，系统才能自动匹配 Zone。', 'warning');
+    return;
+  }
+
+  setBucketLoadingState(true, '正在更新自定义域名配置...');
+  const result = await electronAPI.updateCustomDomain({
+    ...payload,
     currentDomain: state.selectedDomain
   });
   if (!result.success) {
@@ -894,6 +1056,101 @@ function showNotification(message, type = 'info') {
   }, 3000);
 }
 
+/**
+ * 处理自定义域名输入变化，自动匹配可用 Zone。
+ */
+function handleCustomDomainInput() {
+  const domain = getInputValue(elements.customDomain);
+  if (!domain) {
+    state.selectedZoneId = '';
+    if (elements.customDomainZoneId) {
+      elements.customDomainZoneId.value = '';
+    }
+    return;
+  }
+
+  syncZoneSelectionByDomain(domain);
+}
+
+/**
+ * 处理可用域名下拉切换。
+ */
+function handleCustomDomainZoneChange() {
+  syncDomainInputByZoneSelection();
+}
+
+/**
+ * 从远端加载当前账号下的可用域名列表。
+ * @param {Object} options - 加载选项
+ * @param {string} options.loadingText - 加载中的提示文案
+ * @param {boolean} options.silent - 是否静默处理错误
+ * @returns {Promise<boolean>} 是否成功
+ */
+async function loadAvailableDomains(options = {}) {
+  const normalizedOptions = {
+    loadingText: '正在加载可用域名...',
+    silent: false,
+    manageLoading: true,
+    ...options
+  };
+
+  const accountId = getInputValue(elements.cloudflareAccountId);
+  const apiToken = getInputValue(elements.cloudflareApiToken);
+  if (!accountId || !apiToken) {
+    state.availableDomains = [];
+    renderAvailableDomains();
+    return false;
+  }
+  if (state.isLoadingZones) {
+    return false;
+  }
+
+  state.isLoadingZones = true;
+  if (normalizedOptions.manageLoading) {
+    setBucketLoadingState(true, normalizedOptions.loadingText);
+  }
+  renderAvailableDomains();
+
+  try {
+    const result = await electronAPI.listAvailableDomains({
+      ...getSettingsPayload(),
+      cloudflareAccountId: accountId,
+      cloudflareApiToken: apiToken
+    });
+
+    if (!result.success) {
+      throw new Error(result.error?.message || 'Load available domains failed');
+    }
+
+    state.availableDomains = Array.isArray(result.data) ? result.data : [];
+    renderAvailableDomains();
+
+    if (getInputValue(elements.customDomain)) {
+      syncZoneSelectionByDomain(getInputValue(elements.customDomain));
+    }
+
+    if (elements.customDomainZoneId) {
+      elements.customDomainZoneId.value = state.selectedZoneId || '';
+    }
+
+    return true;
+  } catch (error) {
+    state.availableDomains = [];
+    renderAvailableDomains();
+    if (!normalizedOptions.silent) {
+      console.error('加载可用域名失败:', error);
+      showNotification(error.userMessage || '加载可用域名失败，请检查 Cloudflare Zone 读取权限。', 'error');
+    }
+    return false;
+  } finally {
+    state.isLoadingZones = false;
+    if (normalizedOptions.manageLoading) {
+      setBucketLoadingState(false, normalizedOptions.loadingText);
+    }
+    renderAvailableDomains();
+  }
+}
+
 // 重新声明远端同步与桶/域名操作方法，覆盖前面零散补丁留下的中间状态。
 
 async function syncBucketState(options = {}) {
@@ -920,6 +1177,11 @@ async function loadBucketState(options = {}) {
   renderBucketList();
 
   try {
+    await loadAvailableDomains({
+      loadingText: normalizedOptions.loadingText,
+      silent: true,
+      manageLoading: false
+    });
     await syncBucketState(normalizedOptions);
   } catch (error) {
     console.error('同步远端存储桶状态失败:', error);
@@ -1071,8 +1333,18 @@ async function handleCreateCustomDomain() {
     return;
   }
 
+  const payload = buildCustomDomainPayload();
+  if (!payload.domain) {
+    showNotification('请先填写要绑定的完整域名。', 'warning');
+    return;
+  }
+  if (!payload.zoneId) {
+    showNotification('请选择当前账号下可用的域名，系统才能自动匹配 Zone。', 'warning');
+    return;
+  }
+
   setBucketLoadingState(true, '正在绑定自定义域名...');
-  const result = await electronAPI.createCustomDomain(buildCustomDomainPayload());
+  const result = await electronAPI.createCustomDomain(payload);
   if (!result.success) {
     showNotification(result.error?.userMessage || '绑定自定义域名失败', 'error');
     return;
@@ -1089,9 +1361,19 @@ async function handleUpdateCustomDomain() {
     return;
   }
 
+  const payload = buildCustomDomainPayload();
+  if (!payload.domain) {
+    showNotification('请先填写要更新的完整域名。', 'warning');
+    return;
+  }
+  if (!payload.zoneId) {
+    showNotification('请选择当前账号下可用的域名，系统才能自动匹配 Zone。', 'warning');
+    return;
+  }
+
   setBucketLoadingState(true, '正在更新自定义域名配置...');
   const result = await electronAPI.updateCustomDomain({
-    ...buildCustomDomainPayload(),
+    ...payload,
     currentDomain: state.selectedDomain
   });
   if (!result.success) {
@@ -1145,6 +1427,8 @@ function bindEvents() {
       handleR2ConfigInput();
     });
   }
+  if (elements.customDomain) elements.customDomain.addEventListener('change', handleCustomDomainInput);
+  if (elements.customDomainZoneId) elements.customDomainZoneId.addEventListener('change', handleCustomDomainZoneChange);
   if (elements.btnToggleSecret) elements.btnToggleSecret.addEventListener('click', toggleSecretVisibility);
   if (elements.btnTestConnection) elements.btnTestConnection.addEventListener('click', handleTestConnection);
   if (elements.btnClearCredentials) elements.btnClearCredentials.addEventListener('click', handleClearCredentials);
@@ -1216,6 +1500,7 @@ async function loadSettings() {
       elements.cloudflareJurisdiction.value = state.r2Config.cloudflareJurisdiction || 'default';
     }
 
+    renderAvailableDomains();
     await loadBucketState({ bucket: state.r2Config.bucket });
   } catch (error) {
     console.error('加载设置失败:', error);

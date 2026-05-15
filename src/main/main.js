@@ -205,29 +205,35 @@ function resolveCloudflareApiConfig(settings = {}) {
 }
 
 /**
- * Call Cloudflare R2 management API.
+ * 调用 Cloudflare 通用 REST API。
  * @param {Object} params
- * @param {string} params.method
- * @param {string} params.accountId
- * @param {string} params.apiToken
- * @param {string} params.path
- * @param {Object} [params.body]
- * @param {string} [params.jurisdiction]
- * @param {Object} [params.extraHeaders]
+ * @param {string} params.method - 请求方法
+ * @param {string} params.apiToken - Cloudflare API Token
+ * @param {string} params.path - API 路径
+ * @param {Object} [params.body] - JSON 请求体
+ * @param {string} [params.jurisdiction] - R2 管辖区标识
+ * @param {Object} [params.extraHeaders] - 额外请求头
+ * @param {boolean} [params.requireAccountId] - 是否要求 accountId
+ * @param {string} [params.accountId] - Cloudflare Account ID
+ * @param {boolean} [params.includeAccountPath] - 是否自动拼接 /accounts/{accountId}
+ * @param {boolean} [params.returnFullResponse] - 是否返回完整响应体
  * @returns {Promise<any>}
  */
-async function callCloudflareR2Api(params) {
+async function callCloudflareApi(params) {
   const {
     method,
-    accountId,
     apiToken,
     path: apiPath,
     body,
     jurisdiction = DEFAULT_CF_R2_JURISDICTION,
-    extraHeaders = {}
+    extraHeaders = {},
+    requireAccountId = false,
+    accountId = '',
+    includeAccountPath = false,
+    returnFullResponse = false
   } = params;
 
-  if (!accountId) {
+  if (requireAccountId && !accountId) {
     const error = new Error('Cloudflare account id is required');
     error.userMessage = '缺少 Cloudflare Account ID，请在设置中填写后再试。';
     throw error;
@@ -250,7 +256,7 @@ async function callCloudflareR2Api(params) {
     ...extraHeaders
   };
 
-  if (jurisdiction && jurisdiction !== 'default') {
+  if (includeAccountPath && jurisdiction && jurisdiction !== 'default') {
     headers['cf-r2-jurisdiction'] = jurisdiction;
   }
 
@@ -260,7 +266,10 @@ async function callCloudflareR2Api(params) {
     payload = JSON.stringify(body);
   }
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}${apiPath}`;
+  const pathPrefix = includeAccountPath && accountId
+    ? `/accounts/${encodeURIComponent(accountId)}`
+    : '';
+  const url = `https://api.cloudflare.com/client/v4${pathPrefix}${apiPath}`;
   const response = await fetch(url, {
     method,
     headers,
@@ -287,14 +296,31 @@ async function callCloudflareR2Api(params) {
     error.status = response.status;
     error.code = firstError?.code || response.status;
     if (response.status === 401 || response.status === 403) {
-      error.userMessage = 'Cloudflare API Token 无权限或已失效，请检查 Token 的 R2 管理权限。';
+      error.userMessage = 'Cloudflare API Token 无权限或已失效，请检查 Token 权限配置。';
     } else {
       error.userMessage = `Cloudflare API 调用失败：${detailMessage}`;
     }
     throw error;
   }
 
+  if (returnFullResponse) {
+    return data;
+  }
+
   return data?.result ?? data;
+}
+
+/**
+ * 调用 Cloudflare R2 账户级管理 API。
+ * @param {Object} params - 通用 Cloudflare API 参数
+ * @returns {Promise<any>}
+ */
+async function callCloudflareR2Api(params) {
+  return callCloudflareApi({
+    ...params,
+    requireAccountId: true,
+    includeAccountPath: true
+  });
 }
 
 /**
@@ -325,6 +351,75 @@ async function listBucketsViaCloudflareApi(apiConfig) {
       storageClass: item?.storageClass || item?.storage_class || ''
     }))
     .filter(item => item.name);
+}
+
+/**
+ * 标准化可用域名（Zone）信息。
+ * @param {Object} rawZone - Cloudflare API 返回的原始 zone 对象
+ * @returns {{id: string, name: string, status: string, accountId: string}}
+ */
+function normalizeAvailableDomainInfo(rawZone = {}) {
+  return {
+    id: String(rawZone?.id || '').trim(),
+    name: String(rawZone?.name || '').trim(),
+    status: String(rawZone?.status || '').trim(),
+    accountId: String(rawZone?.account?.id || rawZone?.account_id || '').trim()
+  };
+}
+
+/**
+ * 获取当前账号下可用于绑定的所有域名列表。
+ * @param {{accountId: string, apiToken: string, jurisdiction: string}} apiConfig - Cloudflare API 配置
+ * @returns {Promise<Array<{id: string, name: string, status: string, accountId: string}>>}
+ */
+async function listAvailableDomainsViaCloudflareApi(apiConfig) {
+  const perPage = 50;
+  const availableDomains = [];
+  let page = 1;
+
+  while (true) {
+    const query = new URLSearchParams({
+      page: String(page),
+      per_page: String(perPage),
+      order: 'name',
+      direction: 'asc'
+    });
+    if (apiConfig.accountId) {
+      query.set('account.id', apiConfig.accountId);
+    }
+
+    const response = await callCloudflareApi({
+      method: 'GET',
+      apiToken: apiConfig.apiToken,
+      jurisdiction: apiConfig.jurisdiction,
+      path: `/zones?${query.toString()}`,
+      returnFullResponse: true
+    });
+
+    const responseBody = response && typeof response === 'object' && !Array.isArray(response)
+      ? response
+      : { result: [] };
+    const zonesRaw = Array.isArray(responseBody?.result) ? responseBody.result : [];
+
+    availableDomains.push(
+      ...zonesRaw
+        .map(item => normalizeAvailableDomainInfo(item))
+        .filter(item => item.id && item.name)
+    );
+
+    const resultInfo = responseBody.result_info || {};
+    const totalPages = Number(resultInfo.total_pages || 0);
+    if ((totalPages > 0 && page >= totalPages) || zonesRaw.length < perPage) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  const normalizedAccountId = String(apiConfig.accountId || '').trim();
+  return availableDomains
+    .filter(item => !normalizedAccountId || !item.accountId || item.accountId === normalizedAccountId)
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 /**
@@ -2603,6 +2698,25 @@ function registerSettingsHandlers() {
         error: {
           message: error.message,
           userMessage: error.userMessage || '加载自定义域名失败'
+        }
+      };
+    }
+  });
+
+  // Handler for listing available Cloudflare domains (zones)
+  ipcMain.handle('settings:listAvailableDomains', async (event, payload) => {
+    try {
+      const r2Settings = resolveR2Settings(payload || {}, { requireBucket: false });
+      const cfApiConfig = resolveCloudflareApiConfig(r2Settings);
+      const data = await listAvailableDomainsViaCloudflareApi(cfApiConfig);
+      return { success: true, data };
+    } catch (error) {
+      ErrorLogger.logError(error, 'settings:listAvailableDomains');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: error.userMessage || '加载可用域名失败，请检查 Cloudflare Zone 读取权限。'
         }
       };
     }

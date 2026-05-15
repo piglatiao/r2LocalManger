@@ -699,8 +699,11 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="custom-domain-zone-id">Zone ID</label>
-            <input type="text" id="custom-domain-zone-id" class="form-input" placeholder="36ca64a6d92827b8...">
+            <label class="form-label" for="custom-domain-zone-id">可用域名（Zone）</label>
+            <select id="custom-domain-zone-id" class="form-select">
+              <option value="">正在加载可用域名...</option>
+            </select>
+            <p class="help-text">从当前 Cloudflare 账号下的所有可用域名中选择，系统会自动使用对应的 Zone ID。</p>
           </div>
 
           <div class="form-group">
