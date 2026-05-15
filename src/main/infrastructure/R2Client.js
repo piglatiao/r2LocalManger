@@ -33,6 +33,72 @@ const ErrorType = {
 };
 
 /**
+ * 需要优先在浏览器中内联预览的 MIME 类型前缀。
+ * 这些类型复制公开链接后更适合直接预览，而不是触发下载。
+ */
+const INLINE_CONTENT_TYPE_PREFIXES = ['image/', 'video/', 'text/'];
+
+/**
+ * 需要优先在浏览器中内联预览的精确 MIME 类型。
+ */
+const INLINE_CONTENT_TYPES = new Set([
+  'application/pdf',
+  'application/json',
+  'application/xml',
+  'application/javascript',
+  'application/typescript',
+  'application/x-yaml'
+]);
+
+/**
+ * 按扩展名映射 MIME 类型，保证普通上传和拖拽上传写入一致的对象元数据。
+ */
+const MIME_TYPE_BY_EXTENSION = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+  mp4: 'video/mp4',
+  avi: 'video/x-msvideo',
+  mov: 'video/quicktime',
+  wmv: 'video/x-ms-wmv',
+  flv: 'video/x-flv',
+  mkv: 'video/x-matroska',
+  webm: 'video/webm',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  flac: 'audio/flac',
+  aac: 'audio/aac',
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  json: 'application/json',
+  xml: 'application/xml',
+  html: 'text/html',
+  css: 'text/css',
+  js: 'application/javascript',
+  ts: 'application/typescript',
+  yaml: 'application/x-yaml',
+  yml: 'application/x-yaml',
+  zip: 'application/zip',
+  rar: 'application/x-rar-compressed',
+  '7z': 'application/x-7z-compressed',
+  tar: 'application/x-tar',
+  gz: 'application/gzip'
+};
+
+/**
  * R2Client class for interacting with Cloudflare R2 storage
  */
 class R2Client {
@@ -122,12 +188,14 @@ class R2Client {
       }
 
       const fileBuffer = Buffer.concat(chunks);
+      const objectHeaders = this._buildObjectHttpMetadata(key);
 
       // Upload to R2
       const command = new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
-        Body: fileBuffer
+        Body: fileBuffer,
+        ...objectHeaders
       });
 
       await this.s3Client.send(command);
@@ -153,12 +221,14 @@ class R2Client {
         onProgress(0, fileSize);
       }
 
+      const objectHeaders = this._buildObjectHttpMetadata(key, contentType);
+
       // Upload to R2
       const command = new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: buffer,
-        ContentType: contentType || 'application/octet-stream'
+        ...objectHeaders
       });
 
       await this.s3Client.send(command);
@@ -276,11 +346,9 @@ class R2Client {
    */
   async getObjectUrl(key) {
     try {
-      // Use R2_PUBLIC_URL if available, otherwise fall back to endpoint
-      // R2_PUBLIC_URL is the custom domain or public bucket URL
-      const publicUrl = process.env.R2_PUBLIC_URL || this.config.publicUrl || this.config.endpoint;
-      // Construct the public URL
-      // Format: https://{public-url}/{key}
+      // 始终优先使用当前桶同步回来的 publicUrl，避免切桶后沿用旧的全局环境变量。
+      const publicUrl = String(this.config.publicUrl || this.config.endpoint || '').trim().replace(/\/+$/, '');
+      // 直接拼接当前对象访问地址，确保每个桶返回自己的公开域名。
       const url = `${publicUrl}/${key}`;
       return url;
     } catch (error) {
@@ -340,6 +408,62 @@ class R2Client {
     } catch (error) {
       throw this._classifyError(error, 'getObjectStream');
     }
+  }
+
+  /**
+   * 构建对象的 HTTP 元数据，统一控制浏览器访问公开链接时的展示行为。
+   * @private
+   * @param {string} key - 对象 key，用于推断扩展名
+   * @param {string} [providedContentType] - 外部已知的 MIME 类型
+   * @returns {{ContentType: string, ContentDisposition?: string}}
+   */
+  _buildObjectHttpMetadata(key, providedContentType) {
+    const contentType = this._resolveContentType(key, providedContentType);
+    const metadata = {
+      ContentType: contentType
+    };
+
+    if (this._shouldUseInlineDisposition(contentType)) {
+      metadata.ContentDisposition = 'inline';
+    }
+
+    return metadata;
+  }
+
+  /**
+   * 根据显式传入值或文件扩展名推断对象 MIME 类型。
+   * @private
+   * @param {string} key - 对象 key
+   * @param {string} [providedContentType] - 外部传入的 MIME 类型
+   * @returns {string} 标准化后的 MIME 类型
+   */
+  _resolveContentType(key, providedContentType) {
+    const normalizedContentType = String(providedContentType || '').trim();
+    if (normalizedContentType) {
+      return normalizedContentType;
+    }
+
+    const ext = path.extname(String(key || '')).slice(1).toLowerCase();
+    return MIME_TYPE_BY_EXTENSION[ext] || 'application/octet-stream';
+  }
+
+  /**
+   * 判断是否应写入 inline，便于浏览器直接预览公开链接。
+   * @private
+   * @param {string} contentType - 对象 MIME 类型
+   * @returns {boolean} 是否使用 inline
+   */
+  _shouldUseInlineDisposition(contentType) {
+    const normalizedContentType = String(contentType || '').trim().toLowerCase();
+    if (!normalizedContentType) {
+      return false;
+    }
+
+    if (INLINE_CONTENT_TYPES.has(normalizedContentType)) {
+      return true;
+    }
+
+    return INLINE_CONTENT_TYPE_PREFIXES.some(prefix => normalizedContentType.startsWith(prefix));
   }
 
   /**

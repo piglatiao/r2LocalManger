@@ -171,6 +171,11 @@ describe('R2Client', () => {
       await r2Client.uploadObject('test-key', '/path/to/file.jpg');
 
       expect(mockSend).toHaveBeenCalled();
+      expect(PutObjectCommand).toHaveBeenCalledWith(expect.objectContaining({
+        Bucket: 'test-bucket',
+        Key: 'test-key',
+        ContentType: 'application/octet-stream'
+      }));
     });
 
     test('should call progress callback during upload', async () => {
@@ -190,6 +195,28 @@ describe('R2Client', () => {
       await r2Client.uploadObject('test-key', '/path/to/file.jpg', progressCallback);
 
       expect(progressCallback).toHaveBeenCalled();
+    });
+
+    test('should infer preview metadata from object key', async () => {
+      const mockStream = {
+        [Symbol.asyncIterator]: async function* () {
+          yield Buffer.from('image content');
+        }
+      };
+
+      fs.existsSync.mockReturnValue(true);
+      fs.statSync.mockReturnValue({ size: 13 });
+      fs.createReadStream.mockReturnValue(mockStream);
+      mockSend.mockResolvedValue({});
+
+      await r2Client.uploadObject('photo.jpg', '/path/to/file.jpg');
+
+      expect(PutObjectCommand).toHaveBeenCalledWith(expect.objectContaining({
+        Bucket: 'test-bucket',
+        Key: 'photo.jpg',
+        ContentType: 'image/jpeg',
+        ContentDisposition: 'inline'
+      }));
     });
 
     test('should throw error when file does not exist', async () => {
@@ -213,6 +240,46 @@ describe('R2Client', () => {
         .rejects.toMatchObject({
           errorType: ErrorType.FILE_SYSTEM
         });
+    });
+  });
+
+  describe('uploadObjectFromBuffer', () => {
+    test('should use provided content type and inline disposition for previewable files', async () => {
+      const progressCallback = jest.fn();
+      mockSend.mockResolvedValue({});
+
+      await r2Client.uploadObjectFromBuffer(
+        'poster.png',
+        Buffer.from('image content'),
+        'image/png',
+        progressCallback
+      );
+
+      expect(PutObjectCommand).toHaveBeenCalledWith(expect.objectContaining({
+        Bucket: 'test-bucket',
+        Key: 'poster.png',
+        ContentType: 'image/png',
+        ContentDisposition: 'inline'
+      }));
+      expect(progressCallback).toHaveBeenCalledTimes(2);
+    });
+
+    test('should infer content type from key when drag data has no mime', async () => {
+      mockSend.mockResolvedValue({});
+
+      await r2Client.uploadObjectFromBuffer(
+        'clip.webm',
+        Buffer.from('video content'),
+        '',
+        undefined
+      );
+
+      expect(PutObjectCommand).toHaveBeenCalledWith(expect.objectContaining({
+        Bucket: 'test-bucket',
+        Key: 'clip.webm',
+        ContentType: 'video/webm',
+        ContentDisposition: 'inline'
+      }));
     });
   });
 
