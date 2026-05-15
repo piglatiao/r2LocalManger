@@ -1,7 +1,7 @@
 // 加载环境变量
 require('dotenv').config();
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -852,8 +852,13 @@ function createWindow() {
       nodeIntegration: true,
       contextIsolation: false
     },
-    icon: path.join(__dirname, '../../assets/icon.ico')
+    icon: path.join(__dirname, '../../assets/icon.ico'),
+    autoHideMenuBar: true
   });
+
+  // 隐藏 Electron 默认菜单栏，避免显示框架自带按钮。
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.removeMenu();
 
   // 加载渲染进程的 HTML 文件
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -890,6 +895,9 @@ app.on('ready', async () => {
 
   // Register settings handlers
   registerSettingsHandlers();
+
+  // 隐藏应用级默认菜单，避免顶部显示 File / Edit / View 等框架菜单。
+  Menu.setApplicationMenu(null);
 
   createWindow();
 
