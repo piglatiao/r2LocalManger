@@ -42,6 +42,8 @@ function init() {
   elements.btnZoomOut.addEventListener('click', () => handleZoom(-10));
   elements.btnZoomIn.addEventListener('click', () => handleZoom(10));
   elements.btnZoomReset.addEventListener('click', handleZoomReset);
+  elements.previewImage.addEventListener('click', handlePreviewImageClick);
+  elements.previewImage.addEventListener('wheel', handlePreviewWheel, { passive: false });
 
   ipcRenderer.on('preview:data', handlePreviewData);
   ipcRenderer.on('preview:error', handlePreviewError);
@@ -356,6 +358,31 @@ function handleZoom(delta) {
 
   elements.previewImage.style.transform = `scale(${newZoom / 100})`;
   elements.zoomLevel.textContent = `${newZoom}%`;
+}
+
+/**
+ * 点击预览图片时递增缩放，达到上限后回到初始比例。
+ */
+function handlePreviewImageClick() {
+  if (state.currentZoom >= 500) {
+    resetZoom();
+    return;
+  }
+
+  handleZoom(25);
+}
+
+/**
+ * 在预览图片上按住 Ctrl 滚轮调整缩放比例。
+ * @param {WheelEvent} event - 滚轮事件
+ */
+function handlePreviewWheel(event) {
+  if (!event.ctrlKey) {
+    return;
+  }
+
+  event.preventDefault();
+  handleZoom(event.deltaY < 0 ? 10 : -10);
 }
 
 function handleZoomReset() {

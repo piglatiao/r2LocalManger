@@ -10,6 +10,10 @@ const {
   S3Client,
   ListObjectsV2Command,
   PutObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
   GetObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
@@ -17,6 +21,7 @@ const {
 } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
+const { Readable, Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 
 /**
@@ -97,6 +102,11 @@ const MIME_TYPE_BY_EXTENSION = {
   tar: 'application/x-tar',
   gz: 'application/gzip'
 };
+
+const LARGE_UPLOAD_THRESHOLD_BYTES = 300 * 1024 * 1024;
+const DEFAULT_MULTIPART_PART_SIZE_BYTES = 64 * 1024 * 1024;
+const MIN_MULTIPART_PART_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_MULTIPART_PARTS = 10000;
 
 /**
  * R2Client class for interacting with Cloudflare R2 storage
@@ -191,89 +201,262 @@ class R2Client {
   }
 
   /**
-   * Upload a file to R2
-   * @param {string} key - Object key (filename in bucket)
-   * @param {string} filePath - Local file path to upload
-   * @param {Function} onProgress - Optional progress callback (loaded, total) => void
+   * 按文件大小选择流式上传或 S3 Multipart 上传。
+   * @param {string} key - 对象 key
+   * @param {string} filePath - 本地文件路径
+   * @param {Function} onProgress - 传输进度回调（已传输字节数、总字节数）
    * @returns {Promise<void>}
    */
   async uploadObject(key, filePath, onProgress) {
     try {
-      // Check if file exists
       if (!fs.existsSync(filePath)) {
         const error = new Error(`File not found: ${filePath}`);
         error.code = 'ENOENT';
         throw error;
       }
 
-      // Get file stats
       const stats = fs.statSync(filePath);
       const fileSize = stats.size;
-
-      // Read file content
-      const fileStream = fs.createReadStream(filePath);
-      const chunks = [];
-      let uploadedBytes = 0;
-
-      // Collect chunks and track progress
-      for await (const chunk of fileStream) {
-        chunks.push(chunk);
-        uploadedBytes += chunk.length;
-        
-        if (onProgress) {
-          onProgress(uploadedBytes, fileSize);
-        }
-      }
-
-      const fileBuffer = Buffer.concat(chunks);
       const objectHeaders = this._buildObjectHttpMetadata(key);
 
-      // Upload to R2
-      const command = new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: fileBuffer,
-        ...objectHeaders
-      });
+      onProgress?.(0, fileSize);
 
-      await this.s3Client.send(command);
+      if (fileSize > LARGE_UPLOAD_THRESHOLD_BYTES) {
+        await this._uploadMultipartObject(key, filePath, fileSize, objectHeaders, onProgress);
+        return;
+      }
+
+      await this._sendStreamCommand(
+        PutObjectCommand,
+        {
+          Bucket: this.bucket,
+          Key: key,
+          ContentLength: fileSize,
+          ...objectHeaders
+        },
+        fs.createReadStream(filePath),
+        fileSize,
+        0,
+        onProgress
+      );
     } catch (error) {
       throw this._classifyError(error, 'uploadObject');
     }
   }
 
   /**
-   * Upload a buffer to R2 (for drag and drop support)
-   * @param {string} key - Object key (filename in bucket)
-   * @param {Buffer} buffer - Buffer content to upload
-   * @param {string} contentType - Optional content type
-   * @param {Function} onProgress - Optional progress callback (loaded, total) => void
+   * 使用 S3 Multipart 接口顺序上传大文件分片。
+   * @param {string} key - 对象 key
+   * @param {string} filePath - 本地文件路径
+   * @param {number} fileSize - 文件总字节数
+   * @param {Object} objectHeaders - 对象 HTTP 元数据
+   * @param {Function} onProgress - 传输进度回调
+   * @returns {Promise<void>}
+   */
+  async _uploadMultipartObject(key, filePath, fileSize, objectHeaders, onProgress) {
+    await this._uploadMultipart(
+      key,
+      fileSize,
+      objectHeaders,
+      (offset, currentPartSize) => fs.createReadStream(filePath, {
+        start: offset,
+        end: offset + currentPartSize - 1
+      }),
+      onProgress
+    );
+  }
+
+  /**
+   * 使用内存 Buffer 顺序创建 Multipart 分片流。
+   * @param {string} key - 对象 key
+   * @param {Buffer} buffer - 文件内容
+   * @param {Object} objectHeaders - 对象 HTTP 元数据
+   * @param {Function} onProgress - 传输进度回调
+   * @returns {Promise<void>}
+   */
+  async _uploadMultipartBuffer(key, buffer, objectHeaders, onProgress) {
+    await this._uploadMultipart(
+      key,
+      buffer.length,
+      objectHeaders,
+      (offset, currentPartSize) => Readable.from([
+        buffer.subarray(offset, offset + currentPartSize)
+      ]),
+      onProgress
+    );
+  }
+
+  /**
+   * 执行顺序 Multipart 上传并在失败时中止未完成上传。
+   * @param {string} key - 对象 key
+   * @param {number} fileSize - 文件总字节数
+   * @param {Object} objectHeaders - 对象 HTTP 元数据
+   * @param {Function} createPartStream - 根据偏移和长度创建分片流
+   * @param {Function} onProgress - 传输进度回调
+   * @returns {Promise<void>}
+   */
+  async _uploadMultipart(key, fileSize, objectHeaders, createPartStream, onProgress) {
+    const partSize = this._getMultipartPartSize(fileSize);
+    const initResponse = await this.s3Client.send(new CreateMultipartUploadCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ...objectHeaders
+    }));
+
+    const uploadId = initResponse?.UploadId;
+    if (!uploadId) {
+      const error = new Error('Multipart upload did not return an upload ID');
+      error.code = 'MULTIPART_UPLOAD_INIT_FAILED';
+      throw error;
+    }
+
+    const parts = [];
+    let uploadedBytes = 0;
+
+    try {
+      let partNumber = 1;
+      for (let offset = 0; offset < fileSize; offset += partSize, partNumber++) {
+        const currentPartSize = Math.min(partSize, fileSize - offset);
+        const partResponse = await this._sendStreamCommand(
+          UploadPartCommand,
+          {
+            Bucket: this.bucket,
+            Key: key,
+            UploadId: uploadId,
+            PartNumber: partNumber,
+            ContentLength: currentPartSize
+          },
+          createPartStream(offset, currentPartSize),
+          fileSize,
+          uploadedBytes,
+          onProgress
+        );
+
+        if (!partResponse?.ETag) {
+          throw new Error(`Multipart part ${partNumber} did not return an ETag`);
+        }
+
+        parts.push({
+          PartNumber: partNumber,
+          ETag: partResponse.ETag
+        });
+        uploadedBytes += currentPartSize;
+        onProgress?.(uploadedBytes, fileSize);
+      }
+
+      await this.s3Client.send(new CompleteMultipartUploadCommand({
+        Bucket: this.bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: { Parts: parts }
+      }));
+    } catch (error) {
+      try {
+        await this.s3Client.send(new AbortMultipartUploadCommand({
+          Bucket: this.bucket,
+          Key: key,
+          UploadId: uploadId
+        }));
+      } catch (abortError) {
+        error.abortError = abortError;
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * 根据文件大小计算 Multipart 分片大小，避免超过最大分片数量。
+   * @param {number} fileSize - 文件总字节数
+   * @returns {number} 分片字节数
+   */
+  _getMultipartPartSize(fileSize) {
+    const sizeForPartLimit = Math.ceil(
+      fileSize / MAX_MULTIPART_PARTS / MIN_MULTIPART_PART_SIZE_BYTES
+    ) * MIN_MULTIPART_PART_SIZE_BYTES;
+    return Math.max(DEFAULT_MULTIPART_PART_SIZE_BYTES, sizeForPartLimit);
+  }
+
+  /**
+   * 将本地流接入 S3 请求，并按请求体实际消费量报告进度。
+   * @param {Function} Command - S3 命令构造器
+   * @param {Object} input - S3 命令参数
+   * @param {AsyncIterable|Readable} sourceStream - 文件流
+   * @param {number} totalBytes - 整个文件总字节数
+   * @param {number} completedBytes - 当前分片之前已传输字节数
+   * @param {Function} onProgress - 传输进度回调
+   * @returns {Promise<Object>} S3 响应
+   */
+  async _sendStreamCommand(Command, input, sourceStream, totalBytes, completedBytes, onProgress) {
+    let transferredBytes = 0;
+    const progressStream = new Transform({
+      transform: (chunk, encoding, callback) => {
+        try {
+          const chunkSize = Buffer.isBuffer(chunk)
+            ? chunk.length
+            : Buffer.byteLength(String(chunk), encoding);
+          transferredBytes += chunkSize;
+          onProgress?.(completedBytes + transferredBytes, totalBytes);
+          callback(null, chunk);
+        } catch (error) {
+          callback(error);
+        }
+      }
+    });
+    const readableSource = Readable.from(sourceStream);
+    const streamPromise = pipeline(readableSource, progressStream);
+    const uploadPromise = Promise.resolve().then(() => this.s3Client.send(new Command({
+      ...input,
+      Body: progressStream
+    })));
+
+    try {
+      const [, response] = await Promise.all([streamPromise, uploadPromise]);
+      return response;
+    } catch (error) {
+      readableSource.destroy(error);
+      sourceStream.destroy?.();
+      progressStream.destroy(error);
+      await Promise.allSettled([streamPromise, uploadPromise]);
+      throw error;
+    }
+  }
+
+  /**
+   * 流式上传内存 Buffer，供小文件拖放上传使用。
+   * @param {string} key - 对象 key
+   * @param {Buffer} buffer - 文件内容
+   * @param {string} contentType - MIME 类型
+   * @param {Function} onProgress - 传输进度回调
    * @returns {Promise<void>}
    */
   async uploadObjectFromBuffer(key, buffer, contentType, onProgress) {
     try {
       const fileSize = buffer.length;
+      const objectHeaders = this._buildObjectHttpMetadata(key, contentType);
+      onProgress?.(0, fileSize);
 
-      // Report initial progress
-      if (onProgress) {
-        onProgress(0, fileSize);
+      if (fileSize > LARGE_UPLOAD_THRESHOLD_BYTES) {
+        await this._uploadMultipartBuffer(key, buffer, objectHeaders, onProgress);
+        return;
       }
 
-      const objectHeaders = this._buildObjectHttpMetadata(key, contentType);
+      await this._sendStreamCommand(
+        PutObjectCommand,
+        {
+          Bucket: this.bucket,
+          Key: key,
+          ContentLength: fileSize,
+          ...objectHeaders
+        },
+        Readable.from([buffer]),
+        fileSize,
+        0,
+        onProgress
+      );
 
-      // Upload to R2
-      const command = new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: key,
-        Body: buffer,
-        ...objectHeaders
-      });
-
-      await this.s3Client.send(command);
-
-      // Report final progress
-      if (onProgress) {
-        onProgress(fileSize, fileSize);
+      if (fileSize === 0) {
+        onProgress?.(0, fileSize);
       }
     } catch (error) {
       throw this._classifyError(error, 'uploadObjectFromBuffer');

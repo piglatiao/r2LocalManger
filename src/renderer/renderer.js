@@ -4,7 +4,7 @@
  */
 
 // Electron IPC
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webUtils } = require('electron');
 
 // UI 文本（从 zh-CN.js 加载，已挂载到 window.UI_TEXT）
 // 注意：不要使用 const 重新声明，直接引用 window.UI_TEXT
@@ -47,6 +47,25 @@ const electronAPI = {
     
     try {
       const result = await ipcRenderer.invoke('storage:upload', filePath, prefix);
+      if (!result.success) throw result.error;
+      return result.data;
+    } finally {
+      ipcRenderer.removeListener('storage:upload:progress', progressHandler);
+    }
+  },
+
+  /**
+   * 通过 IPC 上传拖放得到的内存文件，并转发真实传输进度。
+   * @param {Object} payload - 文件名、内容和 MIME 类型
+   * @param {Function} onProgress - 上传进度回调
+   * @returns {Promise<Object>} 上传结果
+   */
+  uploadBuffer: async (payload, onProgress) => {
+    const progressHandler = (event, data) => onProgress?.(data);
+    ipcRenderer.on('storage:upload:progress', progressHandler);
+
+    try {
+      const result = await ipcRenderer.invoke('storage:upload-buffer', payload);
       if (!result.success) throw result.error;
       return result.data;
     } finally {
@@ -233,6 +252,7 @@ const IMAGE_FILE_TYPES = new Set(FILE_TYPE_ICONS.image.types);
 const VIDEO_FILE_TYPES = new Set(FILE_TYPE_ICONS.video.types);
 const PREVIEWABLE_FILE_TYPES = new Set(['image', 'video', 'pdf']);
 const GRID_ZOOM_LEVELS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+const LARGE_UPLOAD_THRESHOLD_BYTES = 300 * 1024 * 1024;
 const thumbnailObjectUrls = new Map();
 const thumbnailRequests = new Map();
 
@@ -592,7 +612,9 @@ function setViewMode(viewMode) {
 function updateViewModeControls() {
   if (elements.objectListContainer) {
     elements.objectListContainer.dataset.viewMode = state.viewMode;
-    elements.objectListContainer.style.setProperty('--grid-item-width', `${Math.round(148 * state.gridScale)}px`);
+  }
+  if (elements.objectGrid) {
+    elements.objectGrid.style.setProperty('--grid-item-width', `${Math.round(148 * state.gridScale)}px`);
   }
 
   const viewButtons = [
@@ -614,17 +636,25 @@ function updateViewModeControls() {
  * @param {WheelEvent} event - 滚轮事件
  */
 function handleViewZoom(event) {
-  if (!event.ctrlKey || state.viewMode !== 'grid') {
+  if (!event.ctrlKey) {
     return;
   }
 
   event.preventDefault();
   const currentIndex = GRID_ZOOM_LEVELS.indexOf(state.gridScale);
   const safeIndex = currentIndex === -1 ? 1 : currentIndex;
+  const direction = event.deltaY < 0 ? 1 : -1;
   const nextIndex = Math.max(0, Math.min(
     GRID_ZOOM_LEVELS.length - 1,
-    safeIndex + (event.deltaY < 0 ? 1 : -1)
+    safeIndex + direction
   ));
+
+  if (state.viewMode !== 'grid') {
+    state.viewMode = 'grid';
+    state.gridScale = GRID_ZOOM_LEVELS[nextIndex];
+    updateViewModeControls();
+    return;
+  }
 
   if (nextIndex !== safeIndex) {
     state.gridScale = GRID_ZOOM_LEVELS[nextIndex];
@@ -2823,24 +2853,6 @@ function handleContextMenu(event) {
     }
   }
   
-  // 显示右键菜单
-  elements.contextMenu.style.display = 'block';
-  
-  // 调整菜单位置，确保不超出屏幕
-  const menuRect = elements.contextMenu.getBoundingClientRect();
-  let x = event.pageX;
-  let y = event.pageY;
-  
-  if (x + menuRect.width > window.innerWidth) {
-    x = window.innerWidth - menuRect.width - 10;
-  }
-  if (y + menuRect.height > window.innerHeight) {
-    y = window.innerHeight - menuRect.height - 10;
-  }
-  
-  elements.contextMenu.style.left = `${x}px`;
-  elements.contextMenu.style.top = `${y}px`;
-  
   // 更新菜单项状态
   const selectedObjects = getSelectedObjects();
   const hasOnlyFiles = selectedObjects.length > 0 && selectedObjects.every(object => !object.isFolder);
@@ -2873,6 +2885,15 @@ function handleContextMenu(event) {
       }
     }
   });
+
+  // 固定定位使用视口坐标，确保菜单和子菜单在窗口边缘完整显示。
+  const clientX = Number.isFinite(event.clientX)
+    ? event.clientX
+    : event.pageX - window.scrollX;
+  const clientY = Number.isFinite(event.clientY)
+    ? event.clientY
+    : event.pageY - window.scrollY;
+  positionContextMenu(clientX, clientY);
   
   // 绑定子菜单点击事件
   const submenuItems = elements.contextMenu.querySelectorAll('.submenu-item');
@@ -2897,6 +2918,65 @@ function handleContextMenu(event) {
       hideContextMenu();
     };
   });
+}
+
+/**
+ * 根据视口剩余空间定位右键菜单及复制链接子菜单。
+ * @param {number} clientX - 鼠标相对视口的横坐标
+ * @param {number} clientY - 鼠标相对视口的纵坐标
+ */
+function positionContextMenu(clientX, clientY) {
+  const menu = elements.contextMenu;
+  const submenu = menu.querySelector('.submenu');
+  const submenuParent = menu.querySelector('.menu-item.has-submenu');
+  const edge = 10;
+
+  menu.style.display = 'block';
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+
+  const menuRect = menu.getBoundingClientRect();
+  const maxMenuLeft = Math.max(edge, window.innerWidth - menuRect.width - edge);
+  const maxMenuTop = Math.max(edge, window.innerHeight - menuRect.height - edge);
+  let x = Math.min(Math.max(clientX, edge), maxMenuLeft);
+  const y = Math.min(Math.max(clientY, edge), maxMenuTop);
+
+  if (!submenu) {
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    return;
+  }
+
+  const previousDisplay = submenu.style.display;
+  const previousVisibility = submenu.style.visibility;
+  submenu.style.display = 'block';
+  submenu.style.visibility = 'hidden';
+  const submenuWidth = submenu.offsetWidth;
+  const submenuHeight = submenu.offsetHeight;
+  const rightSpace = window.innerWidth - edge - (x + menuRect.width);
+  const leftSpace = x - edge;
+  const shouldOpenLeft = rightSpace < submenuWidth && leftSpace >= rightSpace;
+
+  if (shouldOpenLeft) {
+    menu.dataset.submenuSide = 'left';
+    x = Math.min(maxMenuLeft, Math.max(edge + submenuWidth, x));
+  } else {
+    menu.dataset.submenuSide = 'right';
+    x = Math.max(edge, Math.min(x, window.innerWidth - edge - menuRect.width - submenuWidth));
+  }
+
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+
+  const parentRect = submenuParent?.getBoundingClientRect();
+  if (parentRect) {
+    const downSpace = window.innerHeight - edge - parentRect.top;
+    const upSpace = parentRect.bottom - edge;
+    menu.dataset.submenuVertical = downSpace < submenuHeight && upSpace > downSpace ? 'up' : 'down';
+  }
+
+  submenu.style.display = previousDisplay;
+  submenu.style.visibility = previousVisibility;
 }
 
 /**
@@ -3120,16 +3200,45 @@ async function handleDroppedFiles(files) {
         totalBytes: file.size
       });
       
-      // 读取文件并上传
-      const arrayBuffer = await file.arrayBuffer();
-      const result = await ipcRenderer.invoke('storage:upload-buffer', {
-        name: state.currentPrefix + file.name,
-        buffer: arrayBuffer,
-        type: file.type
-      });
-      
-      if (!result.success) {
-        throw result.error;
+      const progressCallback = (progress = {}) => {
+        if (progressState.isCancelled) {
+          return;
+        }
+
+        const totalBytes = Number(progress.total) || file.size;
+        const loaded = Number(progress.loaded) || 0;
+        const percent = Number.isFinite(progress.percent)
+          ? progress.percent
+          : (totalBytes > 0 ? Math.round((loaded / totalBytes) * 100) : 0);
+
+        updateBatchProgress({
+          current: currentFileNum,
+          total: totalFiles,
+          filename: file.name,
+          percent,
+          loaded,
+          totalBytes
+        });
+      };
+
+      // Electron 可取得本地路径时直接走文件流，避免大文件进入渲染进程内存。
+      const filePath = typeof file.path === 'string' && file.path
+        ? file.path
+        : (webUtils?.getPathForFile?.(file) || '');
+
+      if (filePath) {
+        await window.electronAPI.uploadFile(filePath, state.currentPrefix, progressCallback);
+      } else {
+        if (file.size > LARGE_UPLOAD_THRESHOLD_BYTES) {
+          throw new Error('无法获取大文件的本地路径，请重新拖入文件后再试。');
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+        await window.electronAPI.uploadBuffer({
+          name: state.currentPrefix + file.name,
+          buffer: arrayBuffer,
+          type: file.type
+        }, progressCallback);
       }
       
       // 更新完成进度

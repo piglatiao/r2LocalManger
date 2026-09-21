@@ -10,6 +10,10 @@ const {
   S3Client,
   ListObjectsV2Command,
   PutObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
   GetObjectCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
@@ -21,6 +25,10 @@ jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(),
   ListObjectsV2Command: jest.fn(),
   PutObjectCommand: jest.fn(),
+  CreateMultipartUploadCommand: jest.fn(),
+  UploadPartCommand: jest.fn(),
+  CompleteMultipartUploadCommand: jest.fn(),
+  AbortMultipartUploadCommand: jest.fn(),
   GetObjectCommand: jest.fn(),
   DeleteObjectCommand: jest.fn(),
   DeleteObjectsCommand: jest.fn(),
@@ -49,6 +57,12 @@ describe('R2Client', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+
+    PutObjectCommand.mockImplementation(input => input);
+    CreateMultipartUploadCommand.mockImplementation(input => input);
+    UploadPartCommand.mockImplementation(input => input);
+    CompleteMultipartUploadCommand.mockImplementation(input => input);
+    AbortMultipartUploadCommand.mockImplementation(input => input);
     
     // Setup mock S3Client
     mockSend = jest.fn();
@@ -295,6 +309,94 @@ describe('R2Client', () => {
         .rejects.toMatchObject({
           errorType: ErrorType.FILE_SYSTEM
         });
+    });
+
+    test('should use multipart upload for files larger than 300 MiB', async () => {
+      const fileSize = 300 * 1024 * 1024 + 1;
+      const progress = [];
+      let sendCount = 0;
+
+      fs.existsSync.mockReturnValue(true);
+      fs.statSync.mockReturnValue({ size: fileSize });
+      fs.createReadStream.mockImplementation(() => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield Buffer.from('part');
+        }
+      }));
+      mockSend.mockImplementation(async command => {
+        sendCount++;
+        if (command?.Body) {
+          for await (const chunk of command.Body) {
+            void chunk;
+          }
+        }
+
+        if (sendCount === 1) {
+          return { UploadId: 'upload-id' };
+        }
+        if (sendCount <= 6) {
+          return { ETag: `etag-${sendCount}` };
+        }
+        return {};
+      });
+
+      await r2Client.uploadObject('large.bin', '/path/to/large.bin', (loaded, total) => {
+        progress.push({ loaded, total });
+      });
+
+      expect(CreateMultipartUploadCommand).toHaveBeenCalledWith(expect.objectContaining({
+        Bucket: 'test-bucket',
+        Key: 'large.bin',
+        ContentType: 'application/octet-stream'
+      }));
+      expect(UploadPartCommand).toHaveBeenCalledTimes(5);
+      expect(CompleteMultipartUploadCommand).toHaveBeenCalledWith(expect.objectContaining({
+        Bucket: 'test-bucket',
+        Key: 'large.bin',
+        UploadId: 'upload-id',
+        MultipartUpload: {
+          Parts: expect.arrayContaining([
+            expect.objectContaining({ PartNumber: 1 }),
+            expect.objectContaining({ PartNumber: 5 })
+          ])
+        }
+      }));
+      expect(AbortMultipartUploadCommand).not.toHaveBeenCalled();
+      expect(progress.at(-1)).toEqual({ loaded: fileSize, total: fileSize });
+    });
+
+    test('should abort multipart upload when a part fails', async () => {
+      const fileSize = 300 * 1024 * 1024 + 1;
+      let sendCount = 0;
+
+      fs.existsSync.mockReturnValue(true);
+      fs.statSync.mockReturnValue({ size: fileSize });
+      fs.createReadStream.mockImplementation(() => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield Buffer.from('part');
+        }
+      }));
+      mockSend.mockImplementation(async command => {
+        sendCount++;
+        if (sendCount === 1) {
+          return { UploadId: 'upload-id' };
+        }
+        if (command?.Body) {
+          for await (const chunk of command.Body) {
+            void chunk;
+          }
+          throw new Error('part upload failed');
+        }
+        return {};
+      });
+
+      await expect(r2Client.uploadObject('large.bin', '/path/to/large.bin'))
+        .rejects.toThrow('part upload failed');
+      expect(AbortMultipartUploadCommand).toHaveBeenCalledWith({
+        Bucket: 'test-bucket',
+        Key: 'large.bin',
+        UploadId: 'upload-id'
+      });
     });
   });
 

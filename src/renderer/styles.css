@@ -861,6 +861,21 @@ body {
   padding: 4px 0;
 }
 
+.context-menu[data-submenu-side="right"] .menu-item.has-submenu .submenu {
+  left: calc(100% + 4px);
+  right: auto;
+}
+
+.context-menu[data-submenu-side="left"] .menu-item.has-submenu .submenu {
+  left: auto;
+  right: calc(100% + 4px);
+}
+
+.context-menu[data-submenu-vertical="up"] .menu-item.has-submenu .submenu {
+  top: auto;
+  bottom: 0;
+}
+
 .menu-item.has-submenu:hover .submenu {
   display: block;
 }
