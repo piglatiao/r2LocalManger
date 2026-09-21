@@ -1547,8 +1547,9 @@ function registerDialogHandlers() {
           // Refresh the object list
           try {
             const activeStorageService = getStorageServiceOrThrow('list');
-            const objects = await activeStorageService.listObjects();
-            event.sender.send('storage:list:updated', { objects });
+            const prefix = typeof context?.prefix === 'string' ? context.prefix : '';
+            const objects = await activeStorageService.listObjects(prefix);
+            event.sender.send('storage:list:updated', { objects, prefix });
           } catch (refreshError) {
             ErrorLogger.logError(refreshError, 'error:refresh');
           }
@@ -1638,13 +1639,13 @@ function registerDialogHandlers() {
  */
 function registerIPCHandlers() {
   // Handler for listing objects
-  ipcMain.handle('storage:list', async (event) => {
+  ipcMain.handle('storage:list', async (event, prefix = '') => {
     try {
       const activeStorageService = getStorageServiceOrThrow('list');
-      const objects = await activeStorageService.listObjects();
+      const objects = await activeStorageService.listObjects(prefix);
       return { success: true, data: objects };
     } catch (error) {
-      ErrorLogger.logError(error, 'storage:list');
+      ErrorLogger.logError(error, 'storage:list', { prefix });
       
       // Get user-friendly message
       let userMessage = ErrorHandler.getUserMessage(error);
@@ -1670,7 +1671,7 @@ function registerIPCHandlers() {
   });
 
   // Handler for uploading files with progress updates
-  ipcMain.handle('storage:upload', async (event, filePath) => {
+  ipcMain.handle('storage:upload', async (event, filePath, prefix = '') => {
     try {
       const activeStorageService = getStorageServiceOrThrow('upload');
 
@@ -1695,10 +1696,10 @@ function registerIPCHandlers() {
         });
       };
 
-      const result = await activeStorageService.uploadFile(filePath, onProgress);
+      const result = await activeStorageService.uploadFile(filePath, onProgress, prefix);
       return { success: true, data: result };
     } catch (error) {
-      ErrorLogger.logError(error, 'storage:upload', { filePath });
+      ErrorLogger.logError(error, 'storage:upload', { filePath, prefix });
       
       // Get user-friendly message
       const userMessage = ErrorHandler.getOperationMessage(error, 'upload');

@@ -180,6 +180,13 @@ var UI_TEXT = {
   buttonNewFolder: '新建文件夹',
   buttonRename: '重命名',
   breadcrumbRoot: '根目录',
+  folderNavigationLabel: '目录导航',
+  folderUp: '返回上级文件夹',
+  folderOpen: '打开文件夹',
+  folderLabel: '文件夹',
+  viewList: '列表视图',
+  viewGrid: '网格视图',
+  statusOpeningFolder: '正在打开文件夹...',
   
   // Drag and drop
   messageDragDrop: '拖放文件到此处上传',

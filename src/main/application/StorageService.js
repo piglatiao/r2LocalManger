@@ -63,14 +63,15 @@ class StorageService {
   }
 
   /**
-   * List all objects in the bucket
-   * @returns {Promise<Array<Object>>} Array of object information
+   * 列出当前目录层级的文件和文件夹。
+   * @param {string} prefix - 当前目录前缀
+   * @returns {Promise<Array<Object>>} 当前目录对象信息
    */
-  async listObjects() {
+  async listObjects(prefix = '') {
     try {
-      return await this.r2Client.listObjects();
+      return await this.r2Client.listObjects(prefix);
     } catch (error) {
-      this._logError(error, 'listObjects');
+      this._logError(error, 'listObjects', { prefix });
       throw this._enhanceError(error, 'listObjects');
     }
   }
@@ -79,9 +80,10 @@ class StorageService {
    * Upload a file to the bucket
    * @param {string} filePath - Local file path to upload
    * @param {Function} onProgress - Optional progress callback (loaded, total) => void
+   * @param {string} prefix - 当前目录前缀
    * @returns {Promise<Object>} Upload result with key and url
    */
-  async uploadFile(filePath, onProgress) {
+  async uploadFile(filePath, onProgress, prefix = '') {
     try {
       // Validate file path
       if (!FileSystemHelper.validatePath(filePath)) {
@@ -102,19 +104,21 @@ class StorageService {
 
       // Extract filename to use as object key
       const filename = FileSystemHelper.getFileName(filePath);
+      const normalizedPrefix = String(prefix || '').replace(/\/+$/, '');
+      const objectKey = normalizedPrefix ? normalizedPrefix + '/' + filename : filename;
 
       // Upload to R2
-      await this.r2Client.uploadObject(filename, filePath, onProgress);
+      await this.r2Client.uploadObject(objectKey, filePath, onProgress);
 
       // Get object URL
-      const url = await this.r2Client.getObjectUrl(filename);
+      const url = await this.r2Client.getObjectUrl(objectKey);
 
       return {
-        key: filename,
+        key: objectKey,
         url: url
       };
     } catch (error) {
-      this._logError(error, 'uploadFile', { filePath });
+      this._logError(error, 'uploadFile', { filePath, prefix });
       throw this._enhanceError(error, 'uploadFile');
     }
   }

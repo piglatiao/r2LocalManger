@@ -10,6 +10,7 @@
   <div id="app">
     <!-- 工具栏 -->
     <header id="toolbar">
+      <div class="toolbar-primary">
       <button id="btn-upload" class="toolbar-btn">
         <span class="btn-icon">📤</span>
         <span class="btn-text" data-i18n="uploadButton">上传</span>
@@ -47,7 +48,9 @@
         <input type="text" id="search-input" class="search-input" placeholder="搜索文件..." data-i18n-placeholder="placeholderSearch">
         <button id="btn-clear-search" class="clear-search-btn" style="display: none;">✕</button>
       </div>
+      </div>
       <div class="toolbar-separator"></div>
+      <div class="toolbar-filters">
       <div class="filter-container">
         <label for="filter-type" class="filter-label" data-i18n="labelFileType">文件类型:</label>
         <select id="filter-type" class="filter-select">
@@ -69,7 +72,18 @@
         <input type="date" id="filter-date-end" class="date-input" data-i18n-placeholder="labelEndDate">
         <button id="btn-clear-date" class="clear-date-btn" style="display: none;" title="清除日期筛选">✕</button>
       </div>
+      <div class="view-mode-container" role="group" aria-label="视图方式">
+        <button id="btn-view-list" class="view-mode-btn active" type="button" aria-label="列表视图" aria-pressed="true" title="列表视图">☷</button>
+        <button id="btn-view-grid" class="view-mode-btn" type="button" aria-label="网格视图" aria-pressed="false" title="网格视图">▦</button>
+      </div>
+      </div>
     </header>
+
+    <!-- 当前目录导航 -->
+    <nav id="folder-navigation" class="folder-navigation" aria-label="目录导航">
+      <button id="btn-folder-up" class="folder-nav-btn" type="button" aria-label="返回上级文件夹" title="返回上级文件夹" disabled>↑</button>
+      <div id="folder-breadcrumbs" class="folder-breadcrumbs"></div>
+    </nav>
     
     <!-- 主内容区域 - 对象列表 -->
     <main id="content" data-drop-hint="拖放文件到此处上传">
@@ -111,6 +125,8 @@
             <!-- 对象列表将动态插入此处 -->
           </tbody>
         </table>
+
+        <div id="object-grid" class="object-grid" aria-live="polite"></div>
         
         <div id="empty-state" style="display: none;">
           <p>暂无对象</p>

@@ -12,8 +12,8 @@ var UI_TEXT = window.UI_TEXT || {};
 
 // IPC API 封装
 const electronAPI = {
-  listObjects: async () => {
-    const result = await ipcRenderer.invoke('storage:list');
+  listObjects: async (prefix = '') => {
+    const result = await ipcRenderer.invoke('storage:list', prefix);
     if (!result.success) throw result.error;
     return result.data;
   },
@@ -38,13 +38,15 @@ const electronAPI = {
     return await ipcRenderer.invoke('dialog:saveFile', defaultFilename);
   },
   
-  uploadFile: async (filePath, onProgress) => {
+  uploadFile: async (filePath, prefixOrProgress = '', maybeProgress) => {
+    const prefix = typeof prefixOrProgress === 'string' ? prefixOrProgress : '';
+    const onProgress = typeof prefixOrProgress === 'function' ? prefixOrProgress : maybeProgress;
     // 监听进度更新
-    const progressHandler = (event, data) => onProgress(data);
+    const progressHandler = (event, data) => onProgress?.(data);
     ipcRenderer.on('storage:upload:progress', progressHandler);
     
     try {
-      const result = await ipcRenderer.invoke('storage:upload', filePath);
+      const result = await ipcRenderer.invoke('storage:upload', filePath, prefix);
       if (!result.success) throw result.error;
       return result.data;
     } finally {
@@ -148,6 +150,10 @@ const elements = {
   btnPreview: document.getElementById('btn-preview'),
   btnDelete: document.getElementById('btn-delete'),
   btnRefresh: document.getElementById('btn-refresh'),
+  btnFolderUp: document.getElementById('btn-folder-up'),
+  folderBreadcrumbs: document.getElementById('folder-breadcrumbs'),
+  btnViewList: document.getElementById('btn-view-list'),
+  btnViewGrid: document.getElementById('btn-view-grid'),
   bucketSwitch: document.getElementById('bucket-switch'),
   bucketCurrentLabel: document.querySelector('.bucket-switch-container .filter-label'),
   searchInput: document.getElementById('search-input'),
@@ -157,6 +163,7 @@ const elements = {
   filterDateEnd: document.getElementById('filter-date-end'),
   btnClearDate: document.getElementById('btn-clear-date'),
   objectListBody: document.getElementById('object-list-body'),
+  objectGrid: document.getElementById('object-grid'),
   objectListContainer: document.getElementById('object-list-container'),
   settingsEmbeddedContainer: document.getElementById('settings-embedded-container'),
   settingsEmbeddedFrame: document.getElementById('settings-embedded-frame'),
@@ -189,6 +196,9 @@ const state = {
   buckets: [],
   currentBucket: '',
   currentSort: { column: 'name', direction: 'asc' },
+  currentPrefix: '', // 当前目录前缀
+  viewMode: 'list', // 当前排列方式
+  gridScale: 1, // 网格图标缩放比例
   searchTerm: '', // 当前搜索词
   filterType: 'all', // 当前文件类型筛选
   filterDateStart: null, // 日期范围筛选 - 开始日期
@@ -222,6 +232,7 @@ const FILE_TYPE_ICONS = {
 const IMAGE_FILE_TYPES = new Set(FILE_TYPE_ICONS.image.types);
 const VIDEO_FILE_TYPES = new Set(FILE_TYPE_ICONS.video.types);
 const PREVIEWABLE_FILE_TYPES = new Set(['image', 'video', 'pdf']);
+const GRID_ZOOM_LEVELS = [0.75, 1, 1.25, 1.5, 1.75, 2];
 const thumbnailObjectUrls = new Map();
 const thumbnailRequests = new Map();
 
@@ -272,6 +283,23 @@ function init() {
   if (elements.btnClearDate) {
     elements.btnClearDate.addEventListener('click', handleClearDateFilter);
   }
+
+  // 绑定目录导航和视图切换事件
+  if (elements.btnFolderUp) {
+    elements.btnFolderUp.addEventListener('click', handleGoToParentFolder);
+  }
+  if (elements.folderBreadcrumbs) {
+    elements.folderBreadcrumbs.addEventListener('click', handleBreadcrumbClick);
+  }
+  if (elements.btnViewList) {
+    elements.btnViewList.addEventListener('click', () => setViewMode('list'));
+  }
+  if (elements.btnViewGrid) {
+    elements.btnViewGrid.addEventListener('click', () => setViewMode('grid'));
+  }
+  if (elements.objectListContainer) {
+    elements.objectListContainer.addEventListener('wheel', handleViewZoom, { passive: false });
+  }
   
   // 绑定键盘快捷键
   document.addEventListener('keydown', handleKeyboard);
@@ -283,6 +311,8 @@ function init() {
   // 绑定表格点击事件
   elements.objectListBody.addEventListener('click', handleTableClick);
   elements.objectListBody.addEventListener('dblclick', handleTableDoubleClick);
+  elements.objectGrid.addEventListener('click', handleGridClick);
+  elements.objectGrid.addEventListener('dblclick', handleGridDoubleClick);
   
   // 绑定拖放事件
   setupDragAndDrop();
@@ -295,6 +325,8 @@ function init() {
   window.addEventListener('beforeunload', cleanupAllThumbnailObjectUrls);
   
   // 加载对象列表
+  renderFolderNavigation();
+  updateViewModeControls();
   loadObjectList({ syncBucketStateFirst: true });
 }
 
@@ -312,8 +344,12 @@ function setupErrorRecoveryListeners() {
   ipcRenderer.on('storage:list:updated', async (event, data) => {
     console.log('收到列表更新:', data);
     if (data.objects) {
+      if (typeof data.prefix === 'string') {
+        state.currentPrefix = normalizeFolderPrefix(data.prefix);
+      }
       state.objects = data.objects;
       cleanupStaleThumbnailObjectUrls(state.objects);
+      renderFolderNavigation();
       renderObjectList();
       updateObjectCount(state.objects.length);
       showNotification(UI_TEXT.refreshSuccess || '列表已刷新', 'success');
@@ -357,6 +393,17 @@ function setTooltips() {
   if (elements.btnClearDate) {
     elements.btnClearDate.title = UI_TEXT.tooltipClearDateRange || '清除日期筛选';
   }
+  if (elements.btnFolderUp) {
+    elements.btnFolderUp.title = UI_TEXT.folderUp || '返回上级文件夹';
+  }
+  if (elements.btnViewList) {
+    elements.btnViewList.title = UI_TEXT.viewList || '列表视图';
+    elements.btnViewList.setAttribute('aria-label', UI_TEXT.viewList || '列表视图');
+  }
+  if (elements.btnViewGrid) {
+    elements.btnViewGrid.title = UI_TEXT.viewGrid || '网格视图';
+    elements.btnViewGrid.setAttribute('aria-label', UI_TEXT.viewGrid || '网格视图');
+  }
 }
 
 /**
@@ -375,6 +422,214 @@ function updateLoadingText(text) {
     elements.loadingText.textContent = text || UI_TEXT.statusLoading || '正在加载...';
   }
 
+}
+
+/**
+ * 规范化 R2 虚拟目录前缀。
+ * @param {string} prefix - 原始目录前缀
+ * @returns {string} 以斜杠结尾的目录前缀，根目录返回空字符串
+ */
+function normalizeFolderPrefix(prefix) {
+  const value = String(prefix || '');
+  if (!value) {
+    return '';
+  }
+  return value.endsWith('/') ? value : `${value}/`;
+}
+
+/**
+ * 获取当前目录的上级目录前缀。
+ * @param {string} prefix - 当前目录前缀
+ * @returns {string} 上级目录前缀
+ */
+function getParentFolderPrefix(prefix) {
+  const normalizedPrefix = normalizeFolderPrefix(prefix);
+  if (!normalizedPrefix) {
+    return '';
+  }
+
+  const withoutTrailingSlash = normalizedPrefix.slice(0, -1);
+  const separatorIndex = withoutTrailingSlash.lastIndexOf('/');
+  return separatorIndex === -1 ? '' : withoutTrailingSlash.slice(0, separatorIndex + 1);
+}
+
+/**
+ * 获取目录的面包屑节点。
+ * @param {string} prefix - 当前目录前缀
+ * @returns {Array<{name: string, prefix: string}>} 面包屑节点
+ */
+function getFolderBreadcrumbs(prefix) {
+  const normalizedPrefix = normalizeFolderPrefix(prefix);
+  const breadcrumbs = [{
+    name: UI_TEXT.breadcrumbRoot || '根目录',
+    prefix: ''
+  }];
+  let currentPrefix = '';
+
+  normalizedPrefix.split('/').filter(Boolean).forEach((segment) => {
+    currentPrefix += `${segment}/`;
+    breadcrumbs.push({ name: segment, prefix: currentPrefix });
+  });
+
+  return breadcrumbs;
+}
+
+/**
+ * 获取对象在当前目录中的显示名称。
+ * @param {Object} objectInfo - 对象信息
+ * @returns {string} 当前目录中的对象名称
+ */
+function getObjectDisplayName(objectInfo) {
+  if (!objectInfo) {
+    return '';
+  }
+
+  if (objectInfo.isFolder) {
+    return objectInfo.name || String(objectInfo.key || '').replace(/\/$/, '').split('/').pop();
+  }
+
+  const key = String(objectInfo.key || '');
+  return state.currentPrefix && key.startsWith(state.currentPrefix)
+    ? key.slice(state.currentPrefix.length)
+    : key;
+}
+
+/**
+ * 渲染当前目录导航。
+ */
+function renderFolderNavigation() {
+  if (!elements.folderBreadcrumbs) {
+    return;
+  }
+
+  const normalizedPrefix = normalizeFolderPrefix(state.currentPrefix);
+  elements.folderBreadcrumbs.innerHTML = '';
+  getFolderBreadcrumbs(normalizedPrefix).forEach((breadcrumb, index) => {
+    if (index > 0) {
+      const separator = document.createElement('span');
+      separator.className = 'folder-breadcrumb-separator';
+      separator.textContent = '›';
+      separator.setAttribute('aria-hidden', 'true');
+      elements.folderBreadcrumbs.appendChild(separator);
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'folder-breadcrumb-btn';
+    button.dataset.prefix = breadcrumb.prefix;
+    button.textContent = breadcrumb.name;
+    button.title = breadcrumb.name;
+
+    if (breadcrumb.prefix === normalizedPrefix) {
+      button.classList.add('active');
+      button.disabled = true;
+      button.setAttribute('aria-current', 'page');
+    }
+
+    elements.folderBreadcrumbs.appendChild(button);
+  });
+
+  if (elements.btnFolderUp) {
+    elements.btnFolderUp.disabled = !normalizedPrefix;
+    elements.btnFolderUp.setAttribute('aria-disabled', String(!normalizedPrefix));
+  }
+}
+
+/**
+ * 处理面包屑点击。
+ * @param {MouseEvent} event - 点击事件
+ */
+function handleBreadcrumbClick(event) {
+  const button = event.target.closest('.folder-breadcrumb-btn');
+  if (!button || button.disabled) {
+    return;
+  }
+
+  openFolder(button.dataset.prefix || '');
+}
+
+/**
+ * 返回上级文件夹。
+ */
+function handleGoToParentFolder() {
+  if (!state.currentPrefix) {
+    return;
+  }
+
+  openFolder(getParentFolderPrefix(state.currentPrefix));
+}
+
+/**
+ * 打开指定的虚拟文件夹。
+ * @param {string} prefix - 目标目录前缀
+ * @returns {Promise<void>} 目录加载结果
+ */
+async function openFolder(prefix) {
+  const targetPrefix = normalizeFolderPrefix(prefix);
+  if (targetPrefix === normalizeFolderPrefix(state.currentPrefix)) {
+    return;
+  }
+
+  await loadObjectList({
+    prefix: targetPrefix,
+    loadingText: UI_TEXT.statusOpeningFolder || '正在打开文件夹...',
+    listStatusText: UI_TEXT.statusOpeningFolder || '正在打开文件夹...'
+  });
+}
+
+/**
+ * 切换列表和网格视图。
+ * @param {'list'|'grid'} viewMode - 目标视图类型
+ */
+function setViewMode(viewMode) {
+  state.viewMode = viewMode === 'grid' ? 'grid' : 'list';
+  updateViewModeControls();
+}
+
+/**
+ * 更新视图按钮和内容区域样式。
+ */
+function updateViewModeControls() {
+  if (elements.objectListContainer) {
+    elements.objectListContainer.dataset.viewMode = state.viewMode;
+    elements.objectListContainer.style.setProperty('--grid-item-width', `${Math.round(148 * state.gridScale)}px`);
+  }
+
+  const viewButtons = [
+    [elements.btnViewList, 'list'],
+    [elements.btnViewGrid, 'grid']
+  ];
+  viewButtons.forEach(([button, mode]) => {
+    if (!button) {
+      return;
+    }
+    const isActive = state.viewMode === mode;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-pressed', String(isActive));
+  });
+}
+
+/**
+ * 在网格视图中使用 Ctrl+滚轮调整图标预览尺寸。
+ * @param {WheelEvent} event - 滚轮事件
+ */
+function handleViewZoom(event) {
+  if (!event.ctrlKey || state.viewMode !== 'grid') {
+    return;
+  }
+
+  event.preventDefault();
+  const currentIndex = GRID_ZOOM_LEVELS.indexOf(state.gridScale);
+  const safeIndex = currentIndex === -1 ? 1 : currentIndex;
+  const nextIndex = Math.max(0, Math.min(
+    GRID_ZOOM_LEVELS.length - 1,
+    safeIndex + (event.deltaY < 0 ? 1 : -1)
+  ));
+
+  if (nextIndex !== safeIndex) {
+    state.gridScale = GRID_ZOOM_LEVELS[nextIndex];
+    updateViewModeControls();
+  }
 }
 
 /**
@@ -509,6 +764,7 @@ function hideLoading() {
  */
 function showEmptyState() {
   elements.objectListBody.innerHTML = '';
+  elements.objectGrid.innerHTML = '';
   elements.emptyState.style.display = 'block';
 }
 
@@ -780,6 +1036,12 @@ async function loadObjectList(options = {}) {
     ...options
   };
   const { syncBucketStateFirst = false, bucket = '' } = normalizedOptions;
+  const requestedPrefix = Object.prototype.hasOwnProperty.call(normalizedOptions, 'prefix')
+    ? normalizedOptions.prefix
+    : state.currentPrefix;
+  const previousPrefix = state.currentPrefix;
+  state.currentPrefix = normalizeFolderPrefix(requestedPrefix);
+  renderFolderNavigation();
   showLoading(normalizedOptions.loadingText);
   updateStatus(normalizedOptions.loadingText);
   updateStatus(UI_TEXT.statusLoading || '正在加载...');
@@ -821,9 +1083,11 @@ async function loadObjectList(options = {}) {
         loadingText: normalizedOptions.syncStatusText
       });
       if (!syncedBucketState?.currentBucket) {
+        state.currentPrefix = '';
         state.objects = [];
         state.filteredObjects = [];
         cleanupStaleThumbnailObjectUrls(state.objects);
+        renderFolderNavigation();
         renderObjectList();
         updateObjectCount(0);
         updateStatus(UI_TEXT.statusReady || '就绪');
@@ -835,10 +1099,11 @@ async function loadObjectList(options = {}) {
     // 调用 IPC 获取对象列表
     updateStatus(normalizedOptions.listStatusText);
     updateLoadingText(normalizedOptions.listStatusText);
-    const objects = await window.electronAPI.listObjects();
+    const objects = await window.electronAPI.listObjects(state.currentPrefix);
     state.objects = objects || [];
     cleanupStaleThumbnailObjectUrls(state.objects);
-    
+
+    renderFolderNavigation();
     renderObjectList();
     updateStatus(UI_TEXT.statusReady || '就绪');
     updateObjectCount(state.objects.length);
@@ -847,6 +1112,10 @@ async function loadObjectList(options = {}) {
       showEmptyState();
     }
   } catch (error) {
+    if (state.currentPrefix !== previousPrefix) {
+      state.currentPrefix = previousPrefix;
+      renderFolderNavigation();
+    }
     state.isSyncingBucketState = false;
     renderBucketSwitch();
     hideLoading();
@@ -883,35 +1152,44 @@ async function loadObjectList(options = {}) {
  */
 function renderObjectList() {
   hideEmptyState();
+  const previousMessage = document.getElementById('no-results-message');
+  if (previousMessage) {
+    previousMessage.remove();
+  }
   elements.objectListBody.innerHTML = '';
-  
-  // 使用过滤后的对象列表（如果有筛选条件）或完整列表
-  const hasFilters = state.searchTerm || state.filterType !== 'all' || state.filterDateStart || state.filterDateEnd;
-  const objectsToRender = hasFilters ? state.filteredObjects : state.objects;
+  elements.objectGrid.innerHTML = '';
+
+  const hasFilters = hasActiveFilters();
+  const objectsToRender = getObjectsToRender();
   
   // 如果有筛选条件但没有匹配结果，显示无结果提示
   if (hasFilters && objectsToRender.length === 0) {
     showNoResultsMessage(state.searchTerm, state.filterType, state.filterDateStart, state.filterDateEnd);
     return;
   }
-  
+
   objectsToRender.forEach((obj, index) => {
     const row = document.createElement('tr');
     row.dataset.key = obj.key;
     row.dataset.index = index;
-    
+    row.dataset.folder = String(Boolean(obj.isFolder));
+    if (obj.isFolder) {
+      row.classList.add('folder-row');
+    }
+
     // 获取文件图标
-    const icon = getFileIcon(obj.key);
+    const icon = getFileIcon(obj.key, obj.isFolder);
+    const displayName = getObjectDisplayName(obj);
     
     // 格式化文件大小
-    const size = formatFileSize(obj.size);
+    const size = obj.isFolder ? '-' : formatFileSize(obj.size);
     
     // 格式化修改时间
     const modified = formatDate(obj.lastModified);
     
     row.innerHTML = `
-      <td class="col-icon">${renderFileCell(obj, icon)}</td>
-      <td class="col-name">${escapeHtml(obj.key)}</td>
+      <td class="col-icon">${renderFileCell(obj, icon, 'list')}</td>
+      <td class="col-name"><span class="object-name" title="${escapeHtml(obj.key)}">${escapeHtml(displayName)}</span></td>
       <td class="col-size">${size}</td>
       <td class="col-modified">${modified}</td>
     `;
@@ -921,16 +1199,57 @@ function renderObjectList() {
       row.classList.add('selected');
     }
 
-    if (supportsListThumbnail(obj.key)) {
+    if (supportsListThumbnail(obj.key) && !obj.isFolder) {
       const previewElement = row.querySelector('.file-preview');
       hydrateThumbnailCell(previewElement, obj);
     }
     
     elements.objectListBody.appendChild(row);
+
+    const gridItem = document.createElement('article');
+    gridItem.className = `grid-item${obj.isFolder ? ' folder-item' : ''}`;
+    gridItem.dataset.key = obj.key;
+    gridItem.dataset.index = index;
+    gridItem.dataset.folder = String(Boolean(obj.isFolder));
+    gridItem.title = obj.isFolder
+      ? `${UI_TEXT.folderOpen || '打开文件夹'}: ${displayName}`
+      : obj.key;
+    gridItem.innerHTML = `
+      <div class="grid-preview">${renderFileCell(obj, icon, 'grid')}</div>
+      <div class="grid-name">${escapeHtml(displayName)}</div>
+      <div class="grid-meta">${obj.isFolder ? escapeHtml(UI_TEXT.folderLabel || '文件夹') : escapeHtml(size)}</div>
+    `;
+
+    if (state.selectedObjects.has(obj.key)) {
+      gridItem.classList.add('selected');
+    }
+
+    if (supportsListThumbnail(obj.key) && !obj.isFolder) {
+      const previewElement = gridItem.querySelector('.file-preview');
+      hydrateThumbnailCell(previewElement, obj);
+    }
+
+    elements.objectGrid.appendChild(gridItem);
   });
-  
+
   // 更新选择计数
   updateSelectionCount();
+}
+
+/**
+ * 判断当前是否存在筛选条件。
+ * @returns {boolean} 是否存在筛选条件
+ */
+function hasActiveFilters() {
+  return Boolean(state.searchTerm || state.filterType !== 'all' || state.filterDateStart || state.filterDateEnd);
+}
+
+/**
+ * 获取当前应显示的对象集合。
+ * @returns {Array<Object>} 当前目录中的可见对象
+ */
+function getObjectsToRender() {
+  return hasActiveFilters() ? state.filteredObjects : state.objects;
 }
 
 /**
@@ -943,6 +1262,7 @@ function renderObjectList() {
 function showNoResultsMessage(searchTerm, filterType, dateStart, dateEnd) {
   const messageDiv = document.createElement('div');
   messageDiv.className = 'no-results-message';
+  messageDiv.id = 'no-results-message';
   
   // 构建提示消息
   let message = '';
@@ -995,7 +1315,7 @@ function showNoResultsMessage(searchTerm, filterType, dateStart, dateEnd) {
     <p>${escapeHtml(message)}</p>
     <p class="hint">${escapeHtml(hint)}</p>
   `;
-  elements.objectListBody.appendChild(messageDiv);
+  elements.objectListContainer.appendChild(messageDiv);
 }
 
 /**
@@ -1196,9 +1516,15 @@ function applyFilters() {
     // 搜索词筛选
     if (hasSearchTerm) {
       const lowerSearchTerm = state.searchTerm.toLowerCase();
-      if (!obj.key.toLowerCase().includes(lowerSearchTerm)) {
+      const displayName = getObjectDisplayName(obj).toLowerCase();
+      if (!displayName.includes(lowerSearchTerm) && !String(obj.key || '').toLowerCase().includes(lowerSearchTerm)) {
         return false;
       }
+    }
+
+    // 文件夹始终保留，确保筛选后仍可继续浏览目录。
+    if (obj.isFolder) {
+      return true;
     }
     
     // 文件类型筛选
@@ -1267,9 +1593,16 @@ function filterObjects(searchTerm) {
 }
 
 /**
- * 获取文件图标
+ * 获取文件或文件夹图标。
+ * @param {string} filename - 文件名或对象 key
+ * @param {boolean} isFolder - 是否为文件夹
+ * @returns {{icon: string, type: string}} 图标信息
  */
-function getFileIcon(filename) {
+function getFileIcon(filename, isFolder = false) {
+  if (isFolder) {
+    return { icon: '📁', type: 'folder' };
+  }
+
   const ext = getFileExtension(filename).toLowerCase();
   
   for (const [type, config] of Object.entries(FILE_TYPE_ICONS)) {
@@ -1288,16 +1621,20 @@ function getFileIcon(filename) {
  * @param {{icon: string, type: string}} iconInfo - 文件图标信息
  * @returns {string} 预览列 HTML
  */
-function renderFileCell(objectInfo, iconInfo) {
+function renderFileCell(objectInfo, iconInfo, variant = 'list') {
+  if (objectInfo.isFolder) {
+    return `<span class="file-icon folder ${variant === 'grid' ? 'grid-folder-icon' : ''}">${escapeHtml(iconInfo.icon)}</span>`;
+  }
+
   if (supportsListThumbnail(objectInfo.key)) {
     return `
-      <span class="file-preview" title="${escapeHtml(objectInfo.key)}">
+      <span class="file-preview${variant === 'grid' ? ' grid-file-preview' : ''}" title="${escapeHtml(objectInfo.key)}">
         <span class="file-icon ${iconInfo.type} file-preview-fallback">${escapeHtml(iconInfo.icon)}</span>
       </span>
     `;
   }
 
-  return `<span class="file-icon ${iconInfo.type}">${escapeHtml(iconInfo.icon)}</span>`;
+  return `<span class="file-icon ${iconInfo.type}${variant === 'grid' ? ' grid-file-icon' : ''}">${escapeHtml(iconInfo.icon)}</span>`;
 }
 
 /**
@@ -1324,7 +1661,7 @@ function isVideoFile(filename) {
  * @returns {boolean} 是否支持列表缩略图
  */
 function supportsListThumbnail(filename) {
-  return isImageFile(filename) || isVideoFile(filename);
+  return Boolean(filename) && (isImageFile(filename) || isVideoFile(filename));
 }
 
 /**
@@ -1583,7 +1920,7 @@ function cleanupAllThumbnailObjectUrls() {
  * 获取文件扩展名
  */
 function getFileExtension(filename) {
-  const parts = filename.split('.');
+  const parts = String(filename || '').split('.');
   return parts.length > 1 ? parts.pop() : '';
 }
 
@@ -1591,6 +1928,7 @@ function getFileExtension(filename) {
  * 格式化文件大小
  */
 function formatFileSize(bytes) {
+  if (!Number.isFinite(Number(bytes))) return '-';
   if (bytes === 0) return '0 B';
   
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -1647,7 +1985,8 @@ async function handleErrorWithRecovery(error, operation, retryCallback) {
     try {
       const context = {
         operation: operation,
-        retryCallback: retryCallback ? true : false
+        retryCallback: retryCallback ? true : false,
+        prefix: state.currentPrefix
       };
       
       const result = await window.electronAPI.showErrorWithActions(error, context);
@@ -1681,20 +2020,41 @@ let lastClickedIndex = -1;
  * 处理表格点击
  */
 function handleTableClick(event) {
-  const row = event.target.closest('tr');
-  if (!row) return;
-  
-  const key = row.dataset.key;
-  const currentIndex = parseInt(row.dataset.index, 10);
-  
+  handleObjectClick(event, event.target.closest('tr'));
+}
+
+/**
+ * 处理网格项点击。
+ * @param {MouseEvent} event - 点击事件
+ */
+function handleGridClick(event) {
+  handleObjectClick(event, event.target.closest('.grid-item'));
+}
+
+/**
+ * 处理文件或文件夹的选择逻辑。
+ * @param {MouseEvent} event - 点击事件
+ * @param {HTMLElement|null} element - 被点击的对象元素
+ */
+function handleObjectClick(event, element) {
+  if (!element) {
+    return;
+  }
+
+  const key = element.dataset.key;
+  const currentIndex = parseInt(element.dataset.index, 10);
+  if (!key || Number.isNaN(currentIndex)) {
+    return;
+  }
+
   // Ctrl 键多选（添加/移除单个项）
   if (event.ctrlKey || event.metaKey) {
     if (state.selectedObjects.has(key)) {
       state.selectedObjects.delete(key);
-      row.classList.remove('selected');
+      updateRenderedObjectSelection(key, false);
     } else {
       state.selectedObjects.add(key);
-      row.classList.add('selected');
+      updateRenderedObjectSelection(key, true);
     }
     lastClickedIndex = currentIndex;
   }
@@ -1706,13 +2066,10 @@ function handleTableClick(event) {
     
     // 选择范围内的所有对象
     for (let i = startIndex; i <= endIndex; i++) {
-      const obj = state.objects[i];
-      if (obj) {
-        state.selectedObjects.add(obj.key);
-        const rowToSelect = elements.objectListBody.querySelector(`tr[data-index="${i}"]`);
-        if (rowToSelect) {
-          rowToSelect.classList.add('selected');
-        }
+      const visibleObject = getObjectsToRender()[i];
+      if (visibleObject) {
+        state.selectedObjects.add(visibleObject.key);
+        updateRenderedObjectSelection(visibleObject.key, true);
       }
     }
     // 不更新 lastClickedIndex，保持范围选择的起点
@@ -1721,7 +2078,7 @@ function handleTableClick(event) {
   else {
     clearSelection();
     state.selectedObjects.add(key);
-    row.classList.add('selected');
+    updateRenderedObjectSelection(key, true);
     lastClickedIndex = currentIndex;
   }
   
@@ -1733,18 +2090,47 @@ function handleTableClick(event) {
  * 处理表格双击
  */
 function handleTableDoubleClick(event) {
-  const row = event.target.closest('tr');
-  if (!row) return;
-  
-  const key = row.dataset.key;
-  selectObject(key);
+  void handleObjectDoubleClick(event, event.target.closest('tr'));
+}
 
-  if (isPreviewableFile(key)) {
-    handlePreview();
+/**
+ * 处理网格项双击。
+ * @param {MouseEvent} event - 双击事件
+ */
+function handleGridDoubleClick(event) {
+  void handleObjectDoubleClick(event, event.target.closest('.grid-item'));
+}
+
+/**
+ * 处理文件或文件夹双击。
+ * @param {MouseEvent} event - 双击事件
+ * @param {HTMLElement|null} element - 被双击的对象元素
+ * @returns {Promise<void>} 双击处理结果
+ */
+async function handleObjectDoubleClick(event, element) {
+  if (!element) {
     return;
   }
 
-  handleDownload();
+  const key = element.dataset.key;
+  const objectInfo = state.objects.find(object => object.key === key);
+  if (!objectInfo) {
+    return;
+  }
+
+  selectObject(key);
+
+  if (objectInfo.isFolder) {
+    await openFolder(objectInfo.key);
+    return;
+  }
+
+  if (isPreviewableFile(key)) {
+    await handlePreview();
+    return;
+  }
+
+  await handleDownload();
 }
 
 /**
@@ -1754,10 +2140,10 @@ function selectObject(objectKey) {
   clearSelection();
   if (objectKey) {
     state.selectedObjects.add(objectKey);
-    const row = elements.objectListBody.querySelector(`tr[data-key="${objectKey}"]`);
-    if (row) {
-      row.classList.add('selected');
-      lastClickedIndex = parseInt(row.dataset.index, 10);
+    updateRenderedObjectSelection(objectKey, true);
+    const renderedObject = findRenderedObjectElement(objectKey);
+    if (renderedObject) {
+      lastClickedIndex = parseInt(renderedObject.dataset.index, 10);
     }
   }
   updateButtonStates();
@@ -1769,10 +2155,33 @@ function selectObject(objectKey) {
  */
 function clearSelection() {
   state.selectedObjects.clear();
-  elements.objectListBody.querySelectorAll('tr.selected').forEach(row => {
-    row.classList.remove('selected');
+  elements.objectListContainer.querySelectorAll('[data-key].selected').forEach(element => {
+    element.classList.remove('selected');
   });
   lastClickedIndex = -1;
+}
+
+/**
+ * 更新同一对象在列表和网格视图中的选中状态。
+ * @param {string} objectKey - 对象 key
+ * @param {boolean} selected - 是否选中
+ */
+function updateRenderedObjectSelection(objectKey, selected) {
+  elements.objectListContainer.querySelectorAll('[data-key]').forEach(element => {
+    if (element.dataset.key === objectKey) {
+      element.classList.toggle('selected', selected);
+    }
+  });
+}
+
+/**
+ * 查找当前渲染的对象元素。
+ * @param {string} objectKey - 对象 key
+ * @returns {HTMLElement|null} 对象元素
+ */
+function findRenderedObjectElement(objectKey) {
+  return Array.from(elements.objectListContainer.querySelectorAll('[data-key]'))
+    .find(element => element.dataset.key === objectKey) || null;
 }
 
 /**
@@ -1780,15 +2189,11 @@ function clearSelection() {
  */
 function selectAll() {
   // 选择当前显示的对象（过滤后的或全部）
-  const hasFilters = state.searchTerm || state.filterType !== 'all' || state.filterDateStart || state.filterDateEnd;
-  const objectsToSelect = hasFilters ? state.filteredObjects : state.objects;
+  const objectsToSelect = getObjectsToRender();
   
   objectsToSelect.forEach((obj, index) => {
     state.selectedObjects.add(obj.key);
-    const row = elements.objectListBody.querySelector(`tr[data-index="${index}"]`);
-    if (row) {
-      row.classList.add('selected');
-    }
+    updateRenderedObjectSelection(obj.key, true);
   });
   
   updateButtonStates();
@@ -1799,11 +2204,13 @@ function selectAll() {
  * 更新按钮状态
  */
 function updateButtonStates() {
-  const hasSelection = state.selectedObjects.size > 0;
-  const selectedObject = getSingleSelectedObject();
-  elements.btnDownload.disabled = !hasSelection;
+  const selected = getSelectedObjects();
+  const selectedFiles = selected.filter(object => !object.isFolder);
+  const hasOnlyFiles = selected.length > 0 && selectedFiles.length === selected.length;
+  const selectedObject = hasOnlyFiles && selectedFiles.length === 1 ? selectedFiles[0] : null;
+  elements.btnDownload.disabled = !hasOnlyFiles;
   elements.btnPreview.disabled = !selectedObject || !isPreviewableFile(selectedObject.key);
-  elements.btnDelete.disabled = !hasSelection;
+  elements.btnDelete.disabled = !hasOnlyFiles;
 }
 
 /**
@@ -1816,7 +2223,7 @@ function updateSelectionCount() {
     elements.objectCount.textContent = template.replace('{count}', count);
   } else {
     // 如果有筛选条件，显示过滤后的数量
-    const hasFilters = state.searchTerm || state.filterType !== 'all' || state.filterDateStart || state.filterDateEnd;
+    const hasFilters = hasActiveFilters();
     const totalCount = hasFilters ? state.filteredObjects.length : state.objects.length;
     
     // 如果有筛选条件，显示筛选后的数量
@@ -1834,6 +2241,14 @@ function updateSelectionCount() {
  */
 function getSelectedObjects() {
   return state.objects.filter(obj => state.selectedObjects.has(obj.key));
+}
+
+/**
+ * 获取当前选中的文件，排除文件夹。
+ * @returns {Array<Object>} 选中的文件
+ */
+function getSelectedFiles() {
+  return getSelectedObjects().filter(object => !object.isFolder);
 }
 
 function getSingleSelectedObject() {
@@ -1867,7 +2282,7 @@ async function handleUpload() {
     showProgress(progressMsg.replace('{filename}', filename));
     updateStatus(UI_TEXT.statusUploading || '正在上传...');
     
-    await window.electronAPI.uploadFile(filePath, (progress) => {
+    await window.electronAPI.uploadFile(filePath, state.currentPrefix, (progress) => {
       // progress.percent is already 0-100 from main process
       const percent = progress.percent;
       updateProgress(percent, progress.loaded, progress.total);
@@ -1894,7 +2309,7 @@ async function handleUpload() {
  * 处理下载按钮点击
  */
 async function handleDownload() {
-  const selected = getSelectedObjects();
+  const selected = getSelectedFiles();
   if (selected.length === 0) return;
   
   // 批量下载（多个对象）
@@ -2022,7 +2437,7 @@ async function handleBatchDownload(objects) {
  * 处理预览按钮点击
  */
 async function handlePreview() {
-  const selected = getSelectedObjects();
+  const selected = getSelectedFiles();
   if (selected.length === 0) return;
   
   const obj = selected[0];
@@ -2050,7 +2465,7 @@ async function handlePreview() {
  * 处理删除按钮点击
  */
 async function handleDelete() {
-  const selected = getSelectedObjects();
+  const selected = getSelectedFiles();
   if (selected.length === 0) return;
   
   // 批量删除（多个对象）
@@ -2188,6 +2603,7 @@ async function handleBucketSwitchChange(event) {
     state.currentBucket = bucketState?.currentBucket || bucket;
     renderBucketSwitch();
     await loadObjectList({
+      prefix: '',
       loadingText: '正在加载新存储桶对象...',
       listStatusText: '正在加载新存储桶对象...'
     });
@@ -2345,8 +2761,13 @@ function handleKeyboard(event) {
   // Enter: 预览
   else if (event.key === 'Enter') {
     event.preventDefault();
-    if (state.selectedObjects.size === 1) {
-      handlePreview();
+    const selected = getSelectedObjects();
+    if (selected.length === 1) {
+      if (selected[0].isFolder) {
+        openFolder(selected[0].key);
+      } else {
+        handlePreview();
+      }
     }
   }
   // Ctrl+C: 复制 URL
@@ -2391,12 +2812,12 @@ function handleContextMenu(event) {
   event.preventDefault();
   
   // 检查是否点击在表格行上
-  const row = event.target.closest('tr');
-  const isOnTable = !!row;
+  const objectElement = event.target.closest('tr, .grid-item');
+  const isOnObject = !!objectElement;
   
-  // 如果点击在表格行上，选中该行
-  if (isOnTable) {
-    const key = row.dataset.key;
+  // 如果点击在对象上，选中该对象
+  if (isOnObject) {
+    const key = objectElement.dataset.key;
     if (!state.selectedObjects.has(key)) {
       selectObject(key);
     }
@@ -2421,9 +2842,10 @@ function handleContextMenu(event) {
   elements.contextMenu.style.top = `${y}px`;
   
   // 更新菜单项状态
-  const hasSelection = state.selectedObjects.size > 0;
+  const selectedObjects = getSelectedObjects();
+  const hasOnlyFiles = selectedObjects.length > 0 && selectedObjects.every(object => !object.isFolder);
   const selectedObject = getSingleSelectedObject();
-  const canPreview = Boolean(selectedObject && isPreviewableFile(selectedObject.key));
+  const canPreview = Boolean(selectedObject && !selectedObject.isFolder && isPreviewableFile(selectedObject.key));
   const menuItems = elements.contextMenu.querySelectorAll('.menu-item');
   const previewMenuItem = elements.contextMenu.querySelector('.menu-item[data-action="preview"]');
 
@@ -2444,7 +2866,7 @@ function handleContextMenu(event) {
     }
 
     if (['download', 'delete', 'copy-url'].includes(action)) {
-      if (hasSelection) {
+      if (hasOnlyFiles) {
         item.classList.remove('disabled');
       } else {
         item.classList.add('disabled');
@@ -2511,7 +2933,7 @@ function handleMenuAction(action) {
  * 处理复制 URL
  */
 async function handleCopyUrl(format) {
-  const selected = getSelectedObjects();
+  const selected = getSelectedFiles();
   if (selected.length === 0) return;
   
   const obj = selected[0];
@@ -2701,7 +3123,7 @@ async function handleDroppedFiles(files) {
       // 读取文件并上传
       const arrayBuffer = await file.arrayBuffer();
       const result = await ipcRenderer.invoke('storage:upload-buffer', {
-        name: file.name,
+        name: state.currentPrefix + file.name,
         buffer: arrayBuffer,
         type: file.type
       });

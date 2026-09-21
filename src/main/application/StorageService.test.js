@@ -75,6 +75,14 @@ describe('StorageService', () => {
       expect(mockR2Client.listObjects).toHaveBeenCalledTimes(1);
     });
 
+    test('should pass the current directory prefix to R2Client', async () => {
+      mockR2Client.listObjects.mockResolvedValue([]);
+
+      await storageService.listObjects('photos/');
+
+      expect(mockR2Client.listObjects).toHaveBeenCalledWith('photos/');
+    });
+
     test('should throw enhanced error on failure', async () => {
       const mockError = new Error('Network error');
       mockError.errorType = ErrorType.NETWORK;
@@ -112,6 +120,23 @@ describe('StorageService', () => {
       await storageService.uploadFile(filePath, progressCallback);
 
       expect(mockR2Client.uploadObject).toHaveBeenCalledWith('image.jpg', filePath, progressCallback);
+    });
+
+    test('should prepend the current directory prefix to the uploaded key', async () => {
+      const filePath = 'C:\\Users\\test\\image.jpg';
+      const expectedUrl = 'https://example.com/picture/photos/image.jpg';
+
+      mockR2Client.uploadObject.mockResolvedValue();
+      mockR2Client.getObjectUrl.mockResolvedValue(expectedUrl);
+
+      const result = await storageService.uploadFile(filePath, undefined, 'photos/');
+
+      expect(result).toEqual({
+        key: 'photos/image.jpg',
+        url: expectedUrl
+      });
+      expect(mockR2Client.uploadObject).toHaveBeenCalledWith('photos/image.jpg', filePath, undefined);
+      expect(mockR2Client.getObjectUrl).toHaveBeenCalledWith('photos/image.jpg');
     });
 
     test('should throw error for invalid file path', async () => {

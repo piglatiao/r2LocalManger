@@ -127,26 +127,64 @@ class R2Client {
   }
 
   /**
-   * List all objects in the bucket
-   * @returns {Promise<Array<ObjectInfo>>} Array of object information
+   * 按当前目录层级列出对象和虚拟文件夹。
+   * @param {string} prefix - 当前目录前缀，根目录为空字符串
+   * @returns {Promise<Array<ObjectInfo>>} 当前目录下的文件和文件夹
    */
-  async listObjects() {
+  async listObjects(prefix = '') {
     try {
+      const normalizedPrefix = String(prefix || '');
       const command = new ListObjectsV2Command({
-        Bucket: this.bucket
+        Bucket: this.bucket,
+        Prefix: normalizedPrefix,
+        Delimiter: '/'
       });
 
       const response = await this.s3Client.send(command);
-      
-      // Transform S3 response to ObjectInfo format
-      const objects = (response.Contents || []).map(item => ({
+
+      const folders = new Map();
+      (response.CommonPrefixes || []).forEach(item => {
+        const folderKey = String(item.Prefix || '');
+        if (!folderKey || folderKey === normalizedPrefix) {
+          return;
+        }
+
+        folders.set(folderKey, {
+          key: folderKey,
+          name: folderKey.slice(normalizedPrefix.length).replace(/\/$/, ''),
+          isFolder: true,
+          size: 0,
+          lastModified: null,
+          contentType: 'application/x-directory'
+        });
+      });
+
+      const contents = response.Contents || [];
+      contents.forEach(item => {
+        const key = String(item.Key || '');
+        if (key && key !== normalizedPrefix && key.endsWith('/')) {
+          folders.set(key, {
+            key,
+            name: key.slice(normalizedPrefix.length).replace(/\/$/, ''),
+            isFolder: true,
+            size: 0,
+            lastModified: item.LastModified || null,
+            contentType: 'application/x-directory'
+          });
+        }
+      });
+
+      // 保留文件对象原有字段，避免影响现有文件操作逻辑。
+      const objects = contents
+        .filter(item => item.Key && item.Key !== normalizedPrefix && !String(item.Key).endsWith('/'))
+        .map(item => ({
         key: item.Key,
         size: item.Size,
         lastModified: item.LastModified,
         contentType: item.ContentType
-      }));
+        }));
 
-      return objects;
+      return [...folders.values(), ...objects];
     } catch (error) {
       throw this._classifyError(error, 'listObjects');
     }

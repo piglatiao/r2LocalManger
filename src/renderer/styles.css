@@ -21,14 +21,40 @@ body {
 
 /* ==================== 工具栏样式 ==================== */
 #toolbar {
-  height: 50px;
+  min-height: 50px;
   background-color: #fff;
   border-bottom: 1px solid #ddd;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   padding: 0 10px;
-  gap: 5px;
+  gap: 0;
   flex-shrink: 0;
+}
+
+.toolbar-primary {
+  min-width: 0;
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.toolbar-filters {
+  min-width: 0;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0 6px;
+  overflow-x: auto;
+}
+
+#toolbar > .toolbar-separator {
+  display: none;
 }
 
 .toolbar-btn {
@@ -155,6 +181,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
 }
 
 .filter-label {
@@ -164,6 +191,7 @@ body {
 }
 
 .filter-select {
+  min-width: 100px;
   padding: 6px 28px 6px 10px;
   border: 1px solid #ddd;
   border-radius: 4px;
@@ -192,6 +220,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
 .date-input {
@@ -203,7 +232,8 @@ body {
   cursor: pointer;
   outline: none;
   transition: all 0.2s;
-  width: 130px;
+  width: 138px;
+  min-width: 138px;
 }
 
 .date-input:hover {
@@ -235,6 +265,118 @@ body {
 .clear-date-btn:hover {
   color: #666;
   background-color: #f0f0f0;
+}
+
+.view-mode-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 2px;
+  flex: 0 0 auto;
+}
+
+.view-mode-btn,
+.folder-nav-btn,
+.folder-breadcrumb-btn {
+  border: 1px solid #d8dee6;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.view-mode-btn {
+  width: 32px;
+  height: 30px;
+  border-radius: 4px;
+  font-size: 19px;
+  line-height: 1;
+}
+
+.view-mode-btn:hover:not(:disabled),
+.view-mode-btn.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.view-mode-btn:focus-visible,
+.folder-nav-btn:focus-visible,
+.folder-breadcrumb-btn:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.35);
+  outline-offset: 1px;
+}
+
+.view-mode-btn:disabled,
+.folder-nav-btn:disabled,
+.folder-breadcrumb-btn:disabled {
+  cursor: default;
+}
+
+/* ==================== 目录导航 ==================== */
+.folder-navigation {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.folder-nav-btn {
+  width: 30px;
+  height: 28px;
+  border-radius: 4px;
+  font-size: 18px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.folder-nav-btn:hover:not(:disabled) {
+  border-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.folder-nav-btn:disabled {
+  color: #cbd5e1;
+  background: #f8fafc;
+}
+
+.folder-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.folder-breadcrumb-btn {
+  max-width: 220px;
+  padding: 4px 7px;
+  border-color: transparent;
+  border-radius: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-breadcrumb-btn:hover:not(:disabled) {
+  border-color: #dbeafe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.folder-breadcrumb-btn.active {
+  color: #1e293b;
+  font-weight: 600;
+}
+
+.folder-breadcrumb-separator {
+  color: #94a3b8;
+  font-size: 17px;
 }
 
 /* ==================== 无搜索结果提示 ==================== */
@@ -409,11 +551,100 @@ body {
 #object-list-container {
   height: 100%;
   overflow: auto;
+  position: relative;
 }
 
 #object-list {
   width: 100%;
   border-collapse: collapse;
+}
+
+#object-list-container[data-view-mode="grid"] #object-list {
+  display: none;
+}
+
+#object-list-container[data-view-mode="list"] #object-grid {
+  display: none;
+}
+
+#object-list-container[data-view-mode="grid"] #object-grid {
+  display: grid;
+}
+
+.object-grid {
+  --grid-item-width: 148px;
+  display: none;
+  grid-template-columns: repeat(auto-fill, minmax(var(--grid-item-width), 1fr));
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+}
+
+.grid-item {
+  min-width: 0;
+  position: relative;
+  padding: 10px 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: center;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.grid-item:hover {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+
+.grid-item.selected {
+  background: #eaf3ff;
+  border-color: #93c5fd;
+}
+
+.grid-item.selected::after {
+  content: '✓';
+  position: absolute;
+  margin: -4px 0 0 -18px;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.grid-preview {
+  height: calc(var(--grid-item-width) * 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.grid-preview .grid-file-preview {
+  width: calc(var(--grid-item-width) * 0.68);
+  height: calc(var(--grid-item-width) * 0.68);
+  border-radius: 6px;
+}
+
+.grid-preview .grid-folder-icon,
+.grid-preview .grid-file-icon {
+  font-size: calc(var(--grid-item-width) * 0.34);
+}
+
+.grid-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1f2937;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.grid-meta {
+  min-height: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #94a3b8;
+  font-size: 11px;
 }
 
 #object-list thead {
@@ -465,6 +696,15 @@ body {
 
 #object-list tbody tr.selected .col-icon {
   position: relative;
+}
+
+.object-name {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
 }
 
 /* 列宽度 */
@@ -528,6 +768,7 @@ body {
 .file-icon.pdf { color: #f44336; }
 .file-icon.document { color: #3f51b5; }
 .file-icon.other { color: #9e9e9e; }
+.file-icon.folder { color: #eab308; }
 
 /* ==================== 空状态 ==================== */
 #empty-state {
@@ -739,6 +980,7 @@ body {
     width: 84px;
     min-width: 84px;
   }
+
 }
 
 @media (max-width: 600px) {

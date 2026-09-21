@@ -102,6 +102,61 @@ describe('R2Client', () => {
       });
     });
 
+    test('should return virtual folders and direct objects for the requested prefix', async () => {
+      const lastModified = new Date('2024-01-03');
+      mockSend.mockResolvedValue({
+        CommonPrefixes: [{ Prefix: 'photos/raw/' }],
+        Contents: [{
+          Key: 'photos/readme.txt',
+          Size: 512,
+          LastModified: lastModified,
+          ContentType: 'text/plain'
+        }]
+      });
+
+      const result = await r2Client.listObjects('photos/');
+
+      expect(ListObjectsV2Command).toHaveBeenCalledWith({
+        Bucket: 'test-bucket',
+        Prefix: 'photos/',
+        Delimiter: '/'
+      });
+      expect(result).toEqual([
+        {
+          key: 'photos/raw/',
+          name: 'raw',
+          isFolder: true,
+          size: 0,
+          lastModified: null,
+          contentType: 'application/x-directory'
+        },
+        {
+          key: 'photos/readme.txt',
+          size: 512,
+          lastModified,
+          contentType: 'text/plain'
+        }
+      ]);
+    });
+
+    test('should convert folder marker objects into folder entries', async () => {
+      mockSend.mockResolvedValue({
+        Contents: [{
+          Key: 'documents/',
+          Size: 0,
+          LastModified: new Date('2024-01-04')
+        }]
+      });
+
+      const result = await r2Client.listObjects();
+
+      expect(result[0]).toMatchObject({
+        key: 'documents/',
+        name: 'documents',
+        isFolder: true
+      });
+    });
+
     test('should return empty array when bucket is empty', async () => {
       mockSend.mockResolvedValue({});
 
