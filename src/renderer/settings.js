@@ -121,10 +121,12 @@ const elements = {
   btnOpenCacheDir: document.getElementById('btn-open-cache-dir'),
   btnRefreshCacheStats: document.getElementById('btn-refresh-cache-stats'),
   appLockEnabled: document.getElementById('app-lock-enabled'),
+  appLockCurrentPasswordGroup: document.getElementById('app-lock-current-password-group'),
   appLockCurrentPassword: document.getElementById('app-lock-current-password'),
   appLockNewPassword: document.getElementById('app-lock-settings-new-password'),
   appLockConfirmPassword: document.getElementById('app-lock-settings-confirm-password'),
   btnChangeAppLockPassword: document.getElementById('btn-app-lock-change'),
+  btnChangeAppLockPasswordText: document.querySelector('#btn-app-lock-change span'),
   credentialsUnprotectedHint: document.getElementById('credentials-unprotected-hint'),
   notificationContainer: document.getElementById('notification-container')
 };
@@ -1677,6 +1679,17 @@ function renderAppLockStatus(lockStatus) {
   if (elements.appLockEnabled) {
     elements.appLockEnabled.checked = state.appLock.enabled;
   }
+  if (elements.appLockCurrentPasswordGroup) {
+    elements.appLockCurrentPasswordGroup.style.display = state.appLock.hasPassword ? '' : 'none';
+  }
+  if (elements.appLockCurrentPassword) {
+    elements.appLockCurrentPassword.required = state.appLock.hasPassword;
+  }
+  if (elements.btnChangeAppLockPasswordText) {
+    elements.btnChangeAppLockPasswordText.textContent = state.appLock.hasPassword
+      ? (UI_TEXT.appLockChangeButton || '修改密码')
+      : (UI_TEXT.appLockSetButton || '设置密码');
+  }
 }
 
 /**
@@ -1745,12 +1758,17 @@ async function handleAppLockToggle() {
  * 修改密码。
  */
 async function handleChangeAppLockPassword() {
+  const hasPassword = state.appLock.hasPassword;
   const currentPassword = getInputValue(elements.appLockCurrentPassword);
   const newPassword = getInputValue(elements.appLockNewPassword);
   const confirmPassword = getInputValue(elements.appLockConfirmPassword);
 
-  if (!currentPassword || !newPassword) {
+  if (hasPassword && !currentPassword) {
     showNotification('请填写当前密码与新密码', 'error');
+    return;
+  }
+  if (!newPassword) {
+    showNotification('请填写新密码', 'error');
     return;
   }
   if (newPassword !== confirmPassword) {
@@ -1759,18 +1777,21 @@ async function handleChangeAppLockPassword() {
   }
 
   try {
-    const result = await electronAPI.changeAppLockPassword({ currentPassword, newPassword });
+    // 首次跳过设置后没有当前密码，使用启用流程设置首个密码。
+    const result = hasPassword
+      ? await electronAPI.changeAppLockPassword({ currentPassword, newPassword })
+      : await electronAPI.setAppLockEnabled({ enabled: true, password: newPassword });
     if (!result.success) {
-      showNotification(result.error?.userMessage || '修改密码失败', 'error');
+      showNotification(result.error?.userMessage || (hasPassword ? '修改密码失败' : '设置密码失败'), 'error');
       return;
     }
 
     renderAppLockStatus(result.data);
     clearAppLockPasswordInputs();
-    showNotification('密码已修改，本地缓存已清空重建', 'success');
+    showNotification(hasPassword ? '密码已修改，本地缓存已清空重建' : '密码已设置，本地缓存已清空重建', 'success');
   } catch (error) {
-    console.error('修改密码失败:', error);
-    showNotification('修改密码失败', 'error');
+    console.error(hasPassword ? '修改密码失败:' : '设置密码失败:', error);
+    showNotification(hasPassword ? '修改密码失败' : '设置密码失败', 'error');
   }
 }
 

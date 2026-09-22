@@ -363,6 +363,7 @@ var UI_TEXT = {
   appLockSectionDescription: '启用后启动应用需要输入密码。本地缓存（缩略图、文件列表）会用该密码加密保存，忘记密码时可用当前存储桶的 Cloudflare 凭据找回。',
   appLockEnableLabel: '启用应用密码锁',
   appLockChangeButton: '修改密码',
+  appLockSetButton: '设置密码',
 
   cacheClearButton: '清理缓存',
   cacheOpenDirectoryButton: '打开缓存目录',
