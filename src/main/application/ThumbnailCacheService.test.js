@@ -163,6 +163,43 @@ describe('ThumbnailCacheService', () => {
     });
   });
 
+  describe('远端清理', () => {
+    test('purgeBuckets 只删远端已消失的桶', async () => {
+      await cache.put(buildMeta(), Buffer.alloc(1024), 'image/jpeg');
+      await cache.put(buildMeta({ bucket: 'backup', key: 'x.png', etag: '"x"' }), Buffer.alloc(1024), 'image/jpeg');
+
+      const removed = await cache.purgeBuckets(['picture']);
+
+      expect(removed).toBe(1);
+      expect(await cache.get(buildMeta())).not.toBeNull();
+      expect(await cache.get(buildMeta({ bucket: 'backup', key: 'x.png', etag: '"x"' }))).toBeNull();
+    });
+
+    test('pruneMissingObjects 删掉当前目录里已不存在的对象', async () => {
+      await cache.put(buildMeta({ key: 'shots/a.png', etag: '"a"' }), Buffer.alloc(1024), 'image/jpeg');
+      await cache.put(buildMeta({ key: 'shots/b.png', etag: '"b"' }), Buffer.alloc(1024), 'image/jpeg');
+
+      const removed = await cache.pruneMissingObjects('picture', 'shots/', ['shots/a.png'], []);
+
+      expect(removed).toBe(1);
+      expect(await cache.get(buildMeta({ key: 'shots/a.png', etag: '"a"' }))).not.toBeNull();
+      expect(await cache.get(buildMeta({ key: 'shots/b.png', etag: '"b"' }))).toBeNull();
+    });
+
+    test('pruneMissingObjects 连带清掉远端已删除文件夹里的对象', async () => {
+      await cache.put(buildMeta({ key: 'gone/a.png', etag: '"ga"' }), Buffer.alloc(1024), 'image/jpeg');
+      await cache.put(buildMeta({ key: 'gone/deep/b.png', etag: '"gb"' }), Buffer.alloc(1024), 'image/jpeg');
+      await cache.put(buildMeta({ key: 'keep/c.png', etag: '"kc"' }), Buffer.alloc(1024), 'image/jpeg');
+
+      const removed = await cache.pruneMissingObjects('picture', '', [], ['keep/']);
+
+      expect(removed).toBe(2);
+      expect(await cache.get(buildMeta({ key: 'keep/c.png', etag: '"kc"' }))).not.toBeNull();
+      expect(await cache.get(buildMeta({ key: 'gone/a.png', etag: '"ga"' }))).toBeNull();
+      expect(await cache.get(buildMeta({ key: 'gone/deep/b.png', etag: '"gb"' }))).toBeNull();
+    });
+  });
+
   describe('加密存储', () => {
     test('落盘内容不含明文，读取时自动解密', async () => {
       const crypto = new LocalCryptoService();

@@ -611,6 +611,9 @@ async function syncCurrentBucketFromRemote(input = {}) {
   const apiConfig = resolveCloudflareApiConfig(baseSettings);
   const buckets = await listBucketsViaCloudflareApi(apiConfig);
 
+  // 远端已经删掉的桶，本地对应的列表 / 缩略图缓存一并清掉
+  purgeCachesForMissingBuckets(buckets.map((item) => item?.name));
+
   let currentBucket = String(input.bucket || baseSettings.bucket || '').trim();
   if (!currentBucket || !buckets.some(item => item.name === currentBucket)) {
     currentBucket = buckets[0]?.name || '';
@@ -623,6 +626,8 @@ async function syncCurrentBucketFromRemote(input = {}) {
       publicUrl: ''
     });
     refreshStorageServiceWithSettings(savedSettings);
+    // 桶已变更，必须让桶名短期缓存立刻失效，否则列表缓存会写到旧桶名下
+    invalidateCurrentBucketName();
     return {
       ...savedSettings,
       buckets,
@@ -648,6 +653,10 @@ async function syncCurrentBucketFromRemote(input = {}) {
     publicUrl
   });
   refreshStorageServiceWithSettings(savedSettings);
+  // 桶已变更，必须让桶名短期缓存立刻失效：
+  // 否则切换桶后的第一次列表会用旧桶名当缓存键 —— 既是缓存未命中（走网络），
+  // 又会把新桶的数据写到旧桶名下（切回来还是未命中）
+  invalidateCurrentBucketName();
 
   return {
     ...savedSettings,
@@ -1096,6 +1105,43 @@ function getCurrentBucketName() {
 }
 
 /**
+ * 强制刷新后按远端真实列表裁剪本地缓存：
+ * 远端删掉的文件 / 文件夹，对应的列表缓存与缩略图缓存一并清除。
+ * @param {string} bucket - 桶名
+ * @param {string} prefix - 当前目录前缀
+ * @param {Array<Object>} objects - 远端返回的最新列表
+ */
+async function pruneLocalCachesToRemote(bucket, prefix, objects) {
+  const liveFolderPrefixes = [];
+  const liveKeys = [];
+
+  (objects || []).forEach((item) => {
+    const key = String(item?.key || '');
+    if (!key) return;
+
+    if (item.isFolder || key.endsWith('/')) {
+      liveFolderPrefixes.push(key.endsWith('/') ? key : `${key}/`);
+    } else {
+      liveKeys.push(key);
+    }
+  });
+
+  const listCache = getObjectListCache();
+  if (listCache) {
+    listCache
+      .pruneMissingFolders(bucket, prefix, liveFolderPrefixes)
+      .catch((error) => ErrorLogger.logError(error, 'objectListCache:prune'));
+  }
+
+  const thumbCache = getThumbnailCache();
+  if (thumbCache) {
+    thumbCache
+      .pruneMissingObjects(bucket, prefix, liveKeys, liveFolderPrefixes)
+      .catch((error) => ErrorLogger.logError(error, 'thumbnailCache:prune'));
+  }
+}
+
+/**
  * 使当前桶名缓存失效（切换桶 / 保存设置后调用）。
  */
 function invalidateCurrentBucketName() {
@@ -1261,9 +1307,71 @@ function invalidateObjectListCache(prefix) {
   const cache = getObjectListCache();
   if (!cache) return;
 
+  // 写操作后必须用最新桶名，短期桶名缓存可能还没过期
+  const bucket = getR2Settings().bucket || '';
+
   cache
-    .invalidate(getCurrentBucketName(), prefix)
+    .invalidate(bucket, prefix)
     .catch((error) => ErrorLogger.logError(error, 'objectListCache:invalidate'));
+}
+
+/**
+ * 失效某个对象 key 所在的目录及其所有上级目录：
+ * 只清必要的条目，其它目录的缓存继续保留，切换目录仍然秒开。
+ * @param {Array<string>|string} keys - 受影响的对象 key
+ */
+function invalidateObjectListCacheForKeys(keys) {
+  const keyList = (Array.isArray(keys) ? keys : [keys])
+    .map((key) => String(key || '').trim())
+    .filter(Boolean);
+
+  // 拿不到 key 时退化为整桶失效，宁可多失效也不能读到脏列表
+  if (keyList.length === 0) {
+    invalidateObjectListCache();
+    return;
+  }
+
+  const prefixes = new Set(['']);
+  keyList.forEach((key) => {
+    const segments = key.split('/').filter(Boolean);
+    segments.pop(); // 去掉文件名，只保留目录段
+    let current = '';
+    segments.forEach((segment) => {
+      current += `${segment}/`;
+      prefixes.add(current);
+    });
+  });
+
+  prefixes.forEach((prefix) => invalidateObjectListCache(prefix));
+}
+
+/**
+ * 远端桶列表同步后：清掉本地已经不属于任何现存桶的缓存（桶被删、换账号）。
+ * @param {Array<string>} validBuckets - 远端仍然存在的桶名
+ */
+function purgeCachesForMissingBuckets(validBuckets) {
+  const buckets = (Array.isArray(validBuckets) ? validBuckets : [])
+    .map((name) => String(name || '').trim())
+    .filter(Boolean);
+
+  // 空列表说明远端没返回有效数据（可能是接口异常），此时不能误删全部缓存
+  if (buckets.length === 0) {
+    return;
+  }
+
+  const listCache = getObjectListCache();
+  if (listCache) {
+    listCache
+      .purgeBuckets(buckets)
+      .catch((error) => ErrorLogger.logError(error, 'objectListCache:purgeBuckets'));
+  }
+
+  const thumbCache = getThumbnailCache();
+  if (thumbCache) {
+    thumbCache
+      .purgeBuckets(buckets)
+      .catch((error) => ErrorLogger.logError(error, 'thumbnailCache:purgeBuckets'));
+  }
 }
 
 /**
@@ -1990,7 +2098,9 @@ function registerIPCHandlers() {
 
     try {
       const cache = getObjectListCache();
-      const bucket = getCurrentBucketName();
+      // 缓存键必须是“当前真实桶名”：列表加载不是高频调用，直接读配置，
+      // 不用那个给缩略图用的 1 秒短期桶名缓存，避免切换桶时把数据写错桶名下
+      const bucket = getR2Settings().bucket || '';
 
       // 非强制刷新时优先使用本地缓存：切换桶 / 切换目录走这里，秒出
       if (cache && !force) {
@@ -2010,6 +2120,12 @@ function registerIPCHandlers() {
 
       if (cache && Array.isArray(objects)) {
         await cache.put(bucket, prefix, objects);
+
+        if (force) {
+          // 强制刷新拿到了远端真实状态：把本地已经“不存在”的缓存同步删掉，
+          // 否则远端删了文件 / 文件夹，本地还一直显示缓存里的旧内容
+          await pruneLocalCachesToRemote(bucket, prefix, objects);
+        }
       }
 
       return { success: true, data: objects, fromCache: false };
@@ -2066,8 +2182,8 @@ function registerIPCHandlers() {
       };
 
       const result = await activeStorageService.uploadFile(filePath, onProgress, prefix);
-      // 写操作后失效列表缓存：写操作频率低，直接按桶失效最省心且不会读到脏列表
-      invalidateObjectListCache();
+      // 写操作后失效列表缓存：只清本次上传所在目录及其上级，其它目录缓存保留
+      invalidateObjectListCacheForKeys(result?.key || prefix || '');
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:upload', { filePath, prefix });
@@ -2120,7 +2236,7 @@ function registerIPCHandlers() {
       };
 
       const result = await activeStorageService.uploadBuffer(name, nodeBuffer, type, onProgress);
-      invalidateObjectListCache();
+      invalidateObjectListCacheForKeys(result?.key || name);
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:upload-buffer', { name });
@@ -2198,7 +2314,7 @@ function registerIPCHandlers() {
     try {
       const activeStorageService = getStorageServiceOrThrow('delete');
       await activeStorageService.deleteFile(key);
-      invalidateObjectListCache();
+      invalidateObjectListCacheForKeys(key);
       return { success: true };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:delete', { key });
@@ -2227,7 +2343,7 @@ function registerIPCHandlers() {
     try {
       const activeStorageService = getStorageServiceOrThrow('delete');
       const result = await activeStorageService.deleteFiles(keys);
-      invalidateObjectListCache();
+      invalidateObjectListCacheForKeys(keys);
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:delete-batch', { keys });

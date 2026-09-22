@@ -113,6 +113,73 @@ describe('ObjectListCacheService', () => {
     });
   });
 
+  describe('远端清理', () => {
+    test('purgeBuckets 清掉远端已删除的桶', async () => {
+      await cache.put('picture', 'photos/', buildObjects(1));
+      await cache.put('picture', 'docs/', buildObjects(1));
+      await cache.put('backup', 'photos/', buildObjects(1));
+
+      const removed = await cache.purgeBuckets(['picture']);
+
+      expect(removed).toBe(1);
+      expect(await cache.get('backup', 'photos/')).toBeNull();
+      expect(await cache.get('picture', 'photos/')).not.toBeNull();
+      expect(await cache.get('picture', 'docs/')).not.toBeNull();
+    });
+
+    test('空桶列表不误删任何缓存', async () => {
+      await cache.put('picture', 'photos/', buildObjects(1));
+
+      const removed = await cache.purgeBuckets([]);
+
+      expect(removed).toBe(0);
+      expect(await cache.get('picture', 'photos/')).not.toBeNull();
+    });
+
+    test('pruneMissingFolders 删掉远端已消失的子目录（含更深层）', async () => {
+      await cache.put('picture', '', buildObjects(1));
+      await cache.put('picture', 'old/', buildObjects(1));
+      await cache.put('picture', 'old/nested/', buildObjects(1));
+      await cache.put('picture', 'keep/', buildObjects(1));
+      await cache.put('picture', 'keep/nested/', buildObjects(1));
+
+      // 根目录刷新回来只剩 keep/
+      const removed = await cache.pruneMissingFolders('picture', '', ['keep/']);
+
+      expect(removed).toBe(2);
+      expect(await cache.get('picture', 'old/')).toBeNull();
+      expect(await cache.get('picture', 'old/nested/')).toBeNull();
+      expect(await cache.get('picture', 'keep/')).not.toBeNull();
+      expect(await cache.get('picture', 'keep/nested/')).not.toBeNull();
+      // 当前目录自身的缓存不会被清
+      expect(await cache.get('picture', '')).not.toBeNull();
+    });
+
+    test('pruneMissingFolders 在子目录内也能按层级判断', async () => {
+      await cache.put('picture', 'shots/', buildObjects(1));
+      await cache.put('picture', 'shots/gone/', buildObjects(1));
+      await cache.put('picture', 'shots/gone/deep/', buildObjects(1));
+      await cache.put('picture', 'shots/keep/', buildObjects(1));
+
+      const removed = await cache.pruneMissingFolders('picture', 'shots/', ['shots/keep/']);
+
+      expect(removed).toBe(2);
+      expect(await cache.get('picture', 'shots/keep/')).not.toBeNull();
+      expect(await cache.get('picture', 'shots/gone/')).toBeNull();
+      expect(await cache.get('picture', 'shots/gone/deep/')).toBeNull();
+    });
+
+    test('pruneMissingFolders 不影响其它桶', async () => {
+      await cache.put('picture', 'old/', buildObjects(1));
+      await cache.put('backup', 'old/', buildObjects(1));
+
+      await cache.pruneMissingFolders('picture', '', []);
+
+      expect(await cache.get('picture', 'old/')).toBeNull();
+      expect(await cache.get('backup', 'old/')).not.toBeNull();
+    });
+  });
+
   describe('LRU eviction', () => {
     test('超过条目上限时淘汰最久未使用的目录', async () => {
       for (let i = 0; i < 40; i += 1) {

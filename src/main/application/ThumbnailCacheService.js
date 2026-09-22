@@ -269,6 +269,93 @@ class ThumbnailCacheService {
   }
 
   /**
+   * 按当前目录的最新远端列表，清理已被删除的缩略图：
+   * - 当前层里已不在远端的文件 key
+   * - key 落在某个远端已经不存在的子文件夹里的
+   * @param {string} bucket - 桶名
+   * @param {string} prefix - 当前目录前缀
+   * @param {Array<string>} liveKeys - 远端仍然存在的对象 key
+   * @param {Array<string>} liveFolderPrefixes - 远端仍然存在的子目录 key
+   * @returns {Promise<number>} 清理条目数
+   */
+  async pruneMissingObjects(bucket, prefix, liveKeys, liveFolderPrefixes) {
+    await this._ensureReady();
+
+    const normalizedBucket = String(bucket || '');
+    const normalizedPrefix = String(prefix || '');
+    const liveFiles = new Set((Array.isArray(liveKeys) ? liveKeys : []).map((key) => String(key || '')));
+    const liveFolders = new Set((Array.isArray(liveFolderPrefixes) ? liveFolderPrefixes : [])
+      .map((key) => String(key || '')));
+
+    let removed = 0;
+
+    for (const entry of Array.from(this.entries.values())) {
+      if (entry.bucket !== normalizedBucket) {
+        continue;
+      }
+
+      const key = String(entry.key || '');
+      if (!key.startsWith(normalizedPrefix)) {
+        continue;
+      }
+
+      const remainder = key.slice(normalizedPrefix.length);
+      if (remainder.includes('/')) {
+        // 深层对象：只要它所属的一级目录还在远端就保留
+        const topFolder = `${normalizedPrefix}${remainder.split('/')[0]}/`;
+        if (liveFolders.has(topFolder)) {
+          continue;
+        }
+      } else if (liveFiles.has(key)) {
+        // 当前层对象：远端列表里还在就保留
+        continue;
+      }
+
+      await this._removeEntry(entry.id);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      this._scheduleFlush();
+    }
+
+    return removed;
+  }
+
+  /**
+   * 清理远端已不存在的桶对应的缩略图。
+   * @param {Array<string>} validBuckets - 远端仍然存在的桶名
+   * @returns {Promise<number>} 清理条目数
+   */
+  async purgeBuckets(validBuckets) {
+    await this._ensureReady();
+
+    const valid = new Set((Array.isArray(validBuckets) ? validBuckets : [])
+      .map((name) => String(name || '').trim())
+      .filter(Boolean));
+
+    // 空列表通常是远端接口异常的结果，不能当成“所有桶都删了”而清空缓存
+    if (valid.size === 0) {
+      return 0;
+    }
+
+    let removed = 0;
+    for (const entry of Array.from(this.entries.values())) {
+      if (valid.has(entry.bucket)) {
+        continue;
+      }
+      await this._removeEntry(entry.id);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      this._scheduleFlush();
+    }
+
+    return removed;
+  }
+
+  /**
    * 清空全部缓存。
    * @returns {Promise<{removed: number, freedBytes: number}>} 清理结果
    */

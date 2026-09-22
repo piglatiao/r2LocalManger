@@ -298,6 +298,97 @@ class ObjectListCacheService {
   }
 
   /**
+   * 清理远端已不存在的桶：缓存里留有某个桶的条目，但 Cloudflare 返回的桶列表里没有它。
+   * @param {Array<string>} validBuckets - 远端仍然存在的桶名
+   * @returns {Promise<number>} 清理条目数
+   */
+  async purgeBuckets(validBuckets) {
+    await this._ensureReady();
+
+    const valid = new Set((Array.isArray(validBuckets) ? validBuckets : [])
+      .map((name) => String(name || '').trim())
+      .filter(Boolean));
+
+    // 空列表通常是远端接口异常的结果，不能当成“所有桶都删了”而清空缓存
+    if (valid.size === 0) {
+      return 0;
+    }
+
+    let removed = 0;
+    for (const entry of Array.from(this.entries.values())) {
+      if (valid.has(entry.bucket)) {
+        continue;
+      }
+      await this._removeEntry(entry.id);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      this._scheduleFlush();
+    }
+
+    return removed;
+  }
+
+  /**
+   * 按最新一次远端列表，清理该目录下已被删除的子目录缓存。
+   * 例如远端删掉了「a/」，本地还缓存着「a/」「a/b/」，
+   * 用根目录刷新回来的 liveFolderPrefixes（不含 a/）即可把它们一起删掉。
+   * @param {string} bucket - 桶名
+   * @param {string} prefix - 当前目录前缀
+   * @param {Array<string>} liveFolderPrefixes - 最新远端列表里仍然存在的子目录 key
+   * @returns {Promise<number>} 清理条目数
+   */
+  async pruneMissingFolders(bucket, prefix, liveFolderPrefixes) {
+    await this._ensureReady();
+
+    // 统一成带末尾斜杠的形式比较：normalizePrefixValue 会去掉斜杠，
+    // 直接用它会让 "a/keep/" 和 "a/keep/nested/" 的层级判断出错
+    const withSlash = (value) => {
+      const text = String(value || '');
+      return text && !text.endsWith('/') ? `${text}/` : text;
+    };
+
+    const normalizedBucket = String(bucket || '');
+    const basePrefix = withSlash(prefix);
+    const live = new Set((Array.isArray(liveFolderPrefixes) ? liveFolderPrefixes : [])
+      .map((item) => withSlash(item))
+      .filter(Boolean));
+
+    let removed = 0;
+    for (const entry of Array.from(this.entries.values())) {
+      if (entry.bucket !== normalizedBucket) {
+        continue;
+      }
+
+      const entryPrefix = withSlash(entry.prefix);
+      if (entryPrefix === basePrefix || !entryPrefix.startsWith(basePrefix)) {
+        continue;
+      }
+
+      // 取该缓存前缀在当前目录下的第一层，看远端是否还有这个文件夹
+      const firstSegment = entryPrefix.slice(basePrefix.length).split('/')[0];
+      if (!firstSegment) {
+        continue;
+      }
+
+      const topFolder = `${basePrefix}${firstSegment}/`;
+      if (live.has(topFolder)) {
+        continue;
+      }
+
+      await this._removeEntry(entry.id);
+      removed += 1;
+    }
+
+    if (removed > 0) {
+      this._scheduleFlush();
+    }
+
+    return removed;
+  }
+
+  /**
    * 清空全部列表缓存。
    * @returns {Promise<{removed: number, freedBytes: number}>} 清理结果
    */
