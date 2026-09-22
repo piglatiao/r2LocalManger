@@ -52,7 +52,6 @@ const electronAPI = {
   clearCache: async () => ipcRenderer.invoke('cache:clear'),
   openCacheLocation: async () => ipcRenderer.invoke('cache:openLocation'),
   getAppLockStatus: async () => ipcRenderer.invoke('appLock:getStatus'),
-  verifyAppLockPassword: async (password) => ipcRenderer.invoke('appLock:verify', password),
   setAppLockEnabled: async (payload) => ipcRenderer.invoke('appLock:setEnabled', payload),
   changeAppLockPassword: async (payload) => ipcRenderer.invoke('appLock:change', payload),
   confirm: async (message) => {
@@ -126,11 +125,7 @@ const elements = {
   appLockNewPassword: document.getElementById('app-lock-settings-new-password'),
   appLockConfirmPassword: document.getElementById('app-lock-settings-confirm-password'),
   btnChangeAppLockPassword: document.getElementById('btn-app-lock-change'),
-  credentialsLockPanel: document.getElementById('credentials-lock-panel'),
   credentialsUnprotectedHint: document.getElementById('credentials-unprotected-hint'),
-  credentialsUnlockPassword: document.getElementById('credentials-unlock-password'),
-  credentialsUnlockError: document.getElementById('credentials-unlock-error'),
-  btnCredentialsUnlock: document.getElementById('btn-credentials-unlock'),
   notificationContainer: document.getElementById('notification-container')
 };
 
@@ -176,12 +171,8 @@ const state = {
   appLock: {
     enabled: false,
     hasPassword: false
-  },
-  credentialsUnlocked: false
+  }
 };
-
-// 凭证未解锁时显示的掩码
-const CREDENTIAL_MASK = '••••••••';
 
 function getInputValue(element, fallback = '') {
   if (!element) return fallback;
@@ -641,11 +632,6 @@ function handleTabClick(tabItem) {
  * 处理凭证输入，更新本地状态与派生 endpoint。
  */
 function handleCredentialInput() {
-  // 未验证密码时输入框是掩码，不能回写到状态里
-  if (isCredentialsLocked()) {
-    return;
-  }
-
   state.credentials.accountId = getInputValue(elements.cloudflareAccountId);
   state.credentials.apiToken = getInputValue(elements.cloudflareApiToken);
   state.credentials.accessKeyId = getInputValue(elements.accessKeyId);
@@ -692,11 +678,6 @@ function toggleSecretVisibility() {
  * 测试当前凭证与当前桶对象访问能力。
  */
 async function handleTestConnection() {
-  if (isCredentialsLocked()) {
-    showNotification('请先验证应用密码后再测试连接', 'error');
-    return;
-  }
-
   if (state.isTesting) return;
 
   const accountId = getInputValue(elements.cloudflareAccountId);
@@ -751,11 +732,6 @@ async function handleTestConnection() {
 }
 
 async function handleClearCredentials() {
-  if (isCredentialsLocked()) {
-    showNotification('请先验证应用密码后再清除凭证', 'error');
-    return;
-  }
-
   const confirmed = await electronAPI.confirm(
     UI_TEXT.securityClearConfirm || '确定要清除已保存的凭证吗？您需要重新输入凭证才能使用应用。'
   );
@@ -1033,11 +1009,6 @@ function handleCancel() {
  * 保存凭证与基础配置。
  */
 async function handleSave() {
-  if (isCredentialsLocked()) {
-    showNotification('请先验证应用密码后再保存凭证', 'error');
-    return;
-  }
-
   const accountId = getInputValue(elements.cloudflareAccountId);
   const apiToken = getInputValue(elements.cloudflareApiToken);
   const accessKeyId = getInputValue(elements.accessKeyId);
@@ -1677,98 +1648,17 @@ async function handleClearCache() {
 }
 
 /**
- * 凭证是否需要先验证应用密码才能查看。
- * @returns {boolean} 是否处于锁定状态
- */
-function isCredentialsLocked() {
-  return Boolean(state.appLock.enabled && state.appLock.hasPassword && !state.credentialsUnlocked);
-}
-
-/**
- * 把凭证值写入输入框。
- * @param {Object} values - 凭证值
- */
-function fillCredentialInputs(values) {
-  if (elements.cloudflareAccountId) elements.cloudflareAccountId.value = values.accountId || '';
-  if (elements.cloudflareApiToken) elements.cloudflareApiToken.value = values.apiToken || '';
-  if (elements.accessKeyId) elements.accessKeyId.value = values.accessKeyId || '';
-  if (elements.secretAccessKey) elements.secretAccessKey.value = values.secretAccessKey || '';
-}
-
-/**
- * 按解锁状态渲染凭证区：未解锁时显示掩码并禁用输入。
+ * 渲染凭证区：设置入口已在主窗口验证过密码，这里直接显示凭证。
+ * 未启用密码锁时给出提示。
  */
 function applyCredentialVisibility() {
-  const locked = isCredentialsLocked();
+  if (elements.cloudflareAccountId) elements.cloudflareAccountId.value = state.credentials.accountId || '';
+  if (elements.cloudflareApiToken) elements.cloudflareApiToken.value = state.credentials.apiToken || '';
+  if (elements.accessKeyId) elements.accessKeyId.value = state.credentials.accessKeyId || '';
+  if (elements.secretAccessKey) elements.secretAccessKey.value = state.credentials.secretAccessKey || '';
 
-  [elements.cloudflareAccountId, elements.cloudflareApiToken, elements.accessKeyId, elements.secretAccessKey]
-    .forEach((input) => {
-      if (input) input.disabled = locked;
-    });
-
-  fillCredentialInputs(locked
-    ? {
-      accountId: CREDENTIAL_MASK,
-      apiToken: CREDENTIAL_MASK,
-      accessKeyId: CREDENTIAL_MASK,
-      secretAccessKey: CREDENTIAL_MASK
-    }
-    : state.credentials);
-
-  if (elements.credentialsLockPanel) {
-    elements.credentialsLockPanel.style.display = locked ? 'flex' : 'none';
-  }
-
-  // 未启用密码锁时给出提示，但不阻断配置（首次配置凭证时本来就没有密码）
   if (elements.credentialsUnprotectedHint) {
-    const showHint = !locked && !state.appLock.enabled;
-    elements.credentialsUnprotectedHint.style.display = showHint ? 'flex' : 'none';
-  }
-}
-
-/**
- * 验证应用密码后查看凭证。
- */
-async function handleCredentialsUnlock() {
-  const password = String(elements.credentialsUnlockPassword?.value || '');
-  if (!password) {
-    if (elements.credentialsUnlockError) {
-      elements.credentialsUnlockError.textContent = '请输入应用密码';
-      elements.credentialsUnlockError.style.display = 'block';
-    }
-    return;
-  }
-
-  if (elements.btnCredentialsUnlock) {
-    elements.btnCredentialsUnlock.disabled = true;
-  }
-
-  try {
-    const result = await electronAPI.verifyAppLockPassword(password);
-    if (!result.success) {
-      if (elements.credentialsUnlockError) {
-        elements.credentialsUnlockError.textContent = result.error?.userMessage || '密码错误';
-        elements.credentialsUnlockError.style.display = 'block';
-      }
-      return;
-    }
-
-    state.credentialsUnlocked = true;
-    if (elements.credentialsUnlockError) {
-      elements.credentialsUnlockError.style.display = 'none';
-    }
-    if (elements.credentialsUnlockPassword) {
-      elements.credentialsUnlockPassword.value = '';
-    }
-    applyCredentialVisibility();
-    showNotification('已验证，可以查看凭证', 'success');
-  } catch (error) {
-    console.error('验证应用密码失败:', error);
-    showNotification('验证应用密码失败', 'error');
-  } finally {
-    if (elements.btnCredentialsUnlock) {
-      elements.btnCredentialsUnlock.disabled = false;
-    }
+    elements.credentialsUnprotectedHint.style.display = state.appLock.enabled ? 'none' : 'flex';
   }
 }
 
@@ -1923,17 +1813,6 @@ function bindEvents() {
   if (elements.thumbnailCacheLimit) {
     elements.thumbnailCacheLimit.addEventListener('change', handleCacheLimitChange);
   }
-  if (elements.btnCredentialsUnlock) {
-    elements.btnCredentialsUnlock.addEventListener('click', handleCredentialsUnlock);
-  }
-  if (elements.credentialsUnlockPassword) {
-    elements.credentialsUnlockPassword.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        handleCredentialsUnlock();
-      }
-    });
-  }
   if (elements.appLockEnabled) elements.appLockEnabled.addEventListener('change', handleAppLockToggle);
   if (elements.btnChangeAppLockPassword) {
     elements.btnChangeAppLockPassword.addEventListener('click', handleChangeAppLockPassword);
@@ -2001,7 +1880,6 @@ async function loadSettings() {
       updateCredentialStatus(false);
     }
 
-    // 未验证密码时只填掩码
     applyCredentialVisibility();
 
     const r2ConfigResult = await electronAPI.getR2Config();
@@ -2017,15 +1895,14 @@ async function loadSettings() {
       };
     }
 
-    if (!isCredentialsLocked()) {
-      if (!getInputValue(elements.cloudflareAccountId) && state.r2Config.cloudflareAccountId) {
-        elements.cloudflareAccountId.value = state.r2Config.cloudflareAccountId;
-      }
-      if (!getInputValue(elements.cloudflareApiToken) && state.r2Config.cloudflareApiToken) {
-        elements.cloudflareApiToken.value = state.r2Config.cloudflareApiToken;
-      }
-      updateDerivedEndpoint();
+    // 设置入口已验证过密码，直接回填凭证；本地没存 accountId/token 时回退到 R2 配置
+    if (!getInputValue(elements.cloudflareAccountId) && state.r2Config.cloudflareAccountId) {
+      elements.cloudflareAccountId.value = state.r2Config.cloudflareAccountId;
     }
+    if (!getInputValue(elements.cloudflareApiToken) && state.r2Config.cloudflareApiToken) {
+      elements.cloudflareApiToken.value = state.r2Config.cloudflareApiToken;
+    }
+    updateDerivedEndpoint();
     if (elements.cloudflareJurisdiction && !getInputValue(elements.cloudflareJurisdiction)) {
       elements.cloudflareJurisdiction.value = state.r2Config.cloudflareJurisdiction || 'default';
     }

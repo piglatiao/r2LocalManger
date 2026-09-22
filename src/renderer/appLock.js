@@ -35,6 +35,8 @@
 
   let status = { enabled: false, hasPassword: false, locked: false, needsSetup: false };
   let startApp = () => Promise.resolve();
+  // 按需验证（如打开设置前）：解锁成功后要执行的回调
+  let pendingAction = null;
 
   const dom = {};
 
@@ -158,6 +160,19 @@
   }
 
   /**
+   * 解锁成功后的统一出口：有按需回调就执行回调，否则进入应用。
+   */
+  async function afterUnlocked() {
+    const action = pendingAction;
+    pendingAction = null;
+    if (action) {
+      await action();
+    } else {
+      await startApp();
+    }
+  }
+
+  /**
    * 解锁。
    */
   async function handleUnlock() {
@@ -175,7 +190,7 @@
       status = await api.unlock(password);
       if (dom.password) dom.password.value = '';
       hide();
-      await startApp();
+      await afterUnlocked();
     } catch (error) {
       showError(dom.error, error.userMessage || '解锁失败');
       if (dom.password) {
@@ -211,7 +226,7 @@
       status = await api.reset({ accountId, apiToken, newPassword });
       clearInputs([dom.accountId, dom.apiToken, dom.newPassword, dom.confirmPassword]);
       hide();
-      await startApp();
+      await afterUnlocked();
     } catch (error) {
       showError(dom.resetError, error.userMessage || '重置密码失败');
     } finally {
@@ -313,6 +328,34 @@
       }
 
       await startApp();
+    },
+
+    /**
+     * 按需验证：启用密码锁时先弹验证，成功后执行 action；
+     * 未启用密码锁则直接执行。用于打开设置等敏感入口。
+     * @param {Function} action - 验证通过后要执行的操作
+     * @param {Object} [options] - 选项
+     * @param {string} [options.title] - 遮罩标题
+     * @param {string} [options.subtitle] - 遮罩副标题
+     */
+    async requestUnlock(action, options = {}) {
+      if (typeof action !== 'function') return;
+
+      resolveElements();
+      bindEvents();
+
+      status = await api.getStatus();
+
+      if (!status.enabled || !status.hasPassword) {
+        await action();
+        return;
+      }
+
+      pendingAction = action;
+      show('unlock');
+
+      if (dom.title) dom.title.textContent = options.title || '身份验证';
+      if (dom.subtitle) dom.subtitle.textContent = options.subtitle || '请输入应用密码以继续';
     },
 
     api

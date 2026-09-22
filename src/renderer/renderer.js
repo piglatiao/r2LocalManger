@@ -1152,6 +1152,10 @@ function shouldSuppressInitialStorageListError(error) {
   return !state.hasCompletedInitialListLoad && error?.code === 'SERVICE_NOT_READY';
 }
 
+// 对象列表加载请求序号：并发加载时只让最新一次请求的结果生效，
+// 避免旧请求后返回覆盖新状态（文件夹丢失、目录被弹回等问题）
+let listLoadSeq = 0;
+
 async function loadObjectList(options = {}) {
   const normalizedOptions = {
     loadingText: UI_TEXT.statusLoading || '正在加载...',
@@ -1166,8 +1170,16 @@ async function loadObjectList(options = {}) {
   const previousPrefix = state.currentPrefix;
   state.currentPrefix = normalizeFolderPrefix(requestedPrefix);
   renderFolderNavigation();
+
+  const seq = ++listLoadSeq;
+  /**
+   * 是否已被更新的加载请求取代。
+   */
+  const isStale = () => seq !== listLoadSeq;
+
   // 命中本地缓存时通常几十毫秒就返回，延迟弹遮罩避免列表闪烁
   const loadingTimer = setTimeout(() => {
+    if (isStale()) return;
     showLoading(normalizedOptions.loadingText);
     updateLoadingText(normalizedOptions.loadingText);
   }, LOADING_OVERLAY_DELAY_MS);
@@ -1175,10 +1187,11 @@ async function loadObjectList(options = {}) {
   updateStatus(UI_TEXT.statusLoading || '正在加载...');
 
   /**
-   * 取消延迟遮罩，确保快速返回时不显示加载态。
+   * 取消延迟遮罩。旧请求不得隐藏新请求的加载态。
    */
   const cancelLoadingOverlay = () => {
     clearTimeout(loadingTimer);
+    if (isStale()) return;
     hideLoading();
   };
 
@@ -1218,6 +1231,12 @@ async function loadObjectList(options = {}) {
         statusText: normalizedOptions.syncStatusText,
         loadingText: normalizedOptions.syncStatusText
       });
+
+      // 桶状态同步期间已有更新的请求发出：本次作废
+      if (isStale()) {
+        return;
+      }
+
       if (!syncedBucketState?.currentBucket) {
         state.currentPrefix = '';
         state.objects = [];
@@ -1237,6 +1256,12 @@ async function loadObjectList(options = {}) {
     updateStatus(normalizedOptions.listStatusText);
     updateLoadingText(normalizedOptions.listStatusText);
     const listResult = await window.electronAPI.listObjects(state.currentPrefix, { force });
+
+    // 已有更新的加载请求发出：丢弃本次结果，不渲染、不改状态
+    if (isStale()) {
+      return;
+    }
+
     const objects = listResult?.objects || [];
     state.objects = objects;
     cleanupStaleThumbnailObjectUrls(state.objects);
@@ -1254,6 +1279,11 @@ async function loadObjectList(options = {}) {
       showEmptyState();
     }
   } catch (error) {
+    // 旧请求的失败不再处理：不恢复目录、不弹错误提示
+    if (isStale()) {
+      return;
+    }
+
     if (state.currentPrefix !== previousPrefix) {
       state.currentPrefix = previousPrefix;
       renderFolderNavigation();
@@ -2947,8 +2977,17 @@ function handleSettingsEmbeddedMessage(event) {
 }
 
 async function handleSettings() {
+  const openSettings = () => openEmbeddedSettings({ forceReload: true });
   try {
-    openEmbeddedSettings({ forceReload: true });
+    // 启用密码锁时，先在主窗口验证密码再打开设置页
+    if (window.appLockScreen?.requestUnlock) {
+      await window.appLockScreen.requestUnlock(openSettings, {
+        title: '打开设置',
+        subtitle: '验证应用密码后可查看凭证与修改设置'
+      });
+    } else {
+      await openSettings();
+    }
   } catch (error) {
     console.error('打开设置窗口失败:', error);
     showNotification(error.userMessage || UI_TEXT.errorUnknown || '打开设置窗口失败', 'error');
