@@ -38,11 +38,14 @@ function buildListCacheId(bucket, prefix) {
 class ObjectListCacheService {
   /**
    * @param {string} rootDir - 缓存根目录的父目录（通常传 app.getPath('userData')）
+   * @param {Object} [options] - 选项
+   * @param {Object} [options.crypto] - LocalCryptoService 实例；提供后落盘内容会被加密
    */
-  constructor(rootDir) {
+  constructor(rootDir, options = {}) {
     this.rootDir = path.join(String(rootDir || '.'), CACHE_DIR_NAME);
     this.indexFilePath = path.join(this.rootDir, INDEX_FILE_NAME);
 
+    this.crypto = options.crypto || null;
     this.enabled = true;
     this.maxEntries = DEFAULT_MAX_ENTRIES;
     this.maxSizeBytes = DEFAULT_MAX_SIZE_BYTES;
@@ -143,13 +146,30 @@ class ObjectListCacheService {
   }
 
   /**
+   * 缓存是否可用：启用且（无加密器或已解锁持有密钥）。
+   * @private
+   * @returns {boolean} 是否可用
+   */
+  _canUseCache() {
+    if (!this.enabled) {
+      return false;
+    }
+
+    if (this.crypto && !this.crypto.hasKey()) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
    * 读取缓存的列表。
    * @param {string} bucket - 桶名
    * @param {string} prefix - 目录前缀
    * @returns {Promise<{objects: Array<Object>, cachedAt: number}|null>} 缓存内容，未命中返回 null
    */
   async get(bucket, prefix) {
-    if (!this.enabled) {
+    if (!this._canUseCache()) {
       return null;
     }
 
@@ -162,8 +182,15 @@ class ObjectListCacheService {
     }
 
     try {
-      const raw = await fs.readFile(path.join(this.rootDir, entry.file), 'utf8');
-      const parsed = JSON.parse(raw);
+      const raw = await fs.readFile(path.join(this.rootDir, entry.file));
+      const plain = this.crypto ? this.crypto.decrypt(raw) : raw;
+      if (!plain) {
+        // 密钥不匹配（改过密码）或内容损坏：丢弃该条目
+        await this._removeEntry(id);
+        return null;
+      }
+
+      const parsed = JSON.parse(plain.toString('utf8'));
       const objects = Array.isArray(parsed?.objects) ? parsed.objects : null;
       if (!objects) {
         await this._removeEntry(id);
@@ -191,7 +218,7 @@ class ObjectListCacheService {
    * @returns {Promise<boolean>} 是否写入成功
    */
   async put(bucket, prefix, objects) {
-    if (!this.enabled || !Array.isArray(objects)) {
+    if (!this._canUseCache() || !Array.isArray(objects)) {
       return false;
     }
 
@@ -208,10 +235,14 @@ class ObjectListCacheService {
       objects
     });
 
+    const stored = this.crypto
+      ? this.crypto.encrypt(Buffer.from(payload, 'utf8'))
+      : Buffer.from(payload, 'utf8');
+
     let bytes = 0;
     try {
-      await fs.writeFile(targetPath, payload, 'utf8');
-      bytes = Buffer.byteLength(payload, 'utf8');
+      await fs.writeFile(targetPath, stored);
+      bytes = stored.length;
     } catch (error) {
       return false;
     }

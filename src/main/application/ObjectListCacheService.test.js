@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ObjectListCacheService, buildListCacheId, normalizePrefixValue } = require('./ObjectListCacheService');
+const { LocalCryptoService, generateKey } = require('./LocalCryptoService');
 
 describe('ObjectListCacheService', () => {
   let rootDir;
@@ -170,6 +171,36 @@ describe('ObjectListCacheService', () => {
       const stats = await cache.getStats();
       expect(stats.count).toBe(0);
       expect(stats.usedBytes).toBe(0);
+    });
+  });
+
+  describe('加密存储', () => {
+    test('落盘内容不含明文文件名', async () => {
+      const crypto = new LocalCryptoService();
+      crypto.setKey(generateKey());
+      const secureCache = new ObjectListCacheService(rootDir, { crypto });
+      await secureCache.init();
+
+      await secureCache.put('picture', 'photos/', [{ key: 'TOP-SECRET.png', size: 1 }]);
+
+      const files = fs.readdirSync(secureCache.rootDir).filter(f => f !== 'index.json');
+      expect(files).toHaveLength(1);
+
+      const rawOnDisk = fs.readFileSync(path.join(secureCache.rootDir, files[0]));
+      expect(rawOnDisk.includes(Buffer.from('TOP-SECRET.png'))).toBe(false);
+      expect(crypto.isEncrypted(rawOnDisk)).toBe(true);
+
+      const hit = await secureCache.get('picture', 'photos/');
+      expect(hit.objects[0].key).toBe('TOP-SECRET.png');
+    });
+
+    test('未持有密钥时不读写', async () => {
+      const crypto = new LocalCryptoService();
+      const secureCache = new ObjectListCacheService(rootDir, { crypto });
+      await secureCache.init();
+
+      expect(await secureCache.put('picture', 'a/', [])).toBe(false);
+      expect(await secureCache.get('picture', 'a/')).toBeNull();
     });
   });
 });

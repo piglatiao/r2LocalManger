@@ -23,13 +23,21 @@
       background-color: #fff;
       border-bottom: 1px solid #ddd;
       padding: 0 20px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .tab-nav::-webkit-scrollbar {
+      display: none;
     }
     
     .tab-nav-item {
-      padding: 12px 20px;
+      padding: 12px 16px;
       cursor: pointer;
       font-size: 14px;
       color: #666;
+      white-space: nowrap;
+      flex-shrink: 0;
       border-bottom: 2px solid transparent;
       transition: all 0.2s;
     }
@@ -41,6 +49,29 @@
     .tab-nav-item.active {
       color: #2196f3;
       border-bottom-color: #2196f3;
+    }
+
+    /* 取消 / 保存：钉在 tab 栏最右侧 */
+    .tab-nav-actions {
+      margin-left: auto;
+      position: sticky;
+      right: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      padding-left: 16px;
+      background-color: #fff;
+      flex-shrink: 0;
+    }
+
+    .tab-nav-actions .btn {
+      min-width: 72px;
+    }
+
+    .btn-sm {
+      padding: 6px 14px;
+      font-size: 13px;
     }
     
     /* Tab content */
@@ -270,16 +301,6 @@
       100% { transform: rotate(360deg); }
     }
     
-    /* Footer */
-    .settings-footer {
-      background-color: #fff;
-      border-top: 1px solid #ddd;
-      padding: 16px 20px;
-      display: flex;
-      justify-content: flex-end;
-      gap: 10px;
-    }
-    
     /* Notification */
     .notification {
       position: fixed;
@@ -482,6 +503,60 @@
       box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
     }
 
+    /* Credentials lock panel */
+    #tab-credentials {
+      position: relative;
+    }
+
+    .credentials-lock-panel {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: #fff;
+      padding: 20px;
+    }
+
+    .credentials-lock-inner {
+      width: 100%;
+      max-width: 320px;
+      text-align: center;
+    }
+
+    .credentials-unprotected-hint {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 10px 12px;
+      border: 1px solid #ffe0b2;
+      border-radius: 4px;
+      background-color: #fff8e1;
+      color: #8d6e63;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .credentials-lock-icon {
+      font-size: 30px;
+    }
+
+    .credentials-lock-title {
+      margin: 10px 0 6px;
+      font-size: 17px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .credentials-lock-hint {
+      margin: 0 0 18px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #888;
+    }
+
     /* Cache stats */
     .cache-stats {
       margin-top: 16px;
@@ -558,6 +633,17 @@
       <div class="tab-nav-item" data-tab="cache">
         <span data-i18n="settingsTabCache">缓存设置</span>
       </div>
+      <div class="tab-nav-item" data-tab="security">
+        <span data-i18n="settingsTabSecurity">安全与密码</span>
+      </div>
+      <div class="tab-nav-actions">
+        <button id="btn-cancel" class="btn btn-secondary btn-sm" type="button">
+          <span data-i18n="settingsButtonCancel">取消</span>
+        </button>
+        <button id="btn-save" class="btn btn-primary btn-sm" type="button">
+          <span data-i18n="settingsButtonSave">保存设置</span>
+        </button>
+      </div>
     </nav>
     
     <!-- Tab content -->
@@ -630,16 +716,70 @@
           </div>
         </div>
         
-        <!-- Security settings -->
+        <div id="credentials-unprotected-hint" class="credentials-unprotected-hint" style="display: none;">
+          <span>⚠️</span>
+          <span>当前未启用应用密码锁，本机任何人都可以查看这些凭证。建议到「安全与密码」启用密码锁。</span>
+        </div>
+
+        <!-- 凭证受密码保护时的解锁面板 -->
+        <div id="credentials-lock-panel" class="credentials-lock-panel" style="display: none;">
+          <div class="credentials-lock-inner">
+            <span class="credentials-lock-icon">🔒</span>
+            <h3 class="credentials-lock-title">凭证已锁定</h3>
+            <p class="credentials-lock-hint">查看或修改 R2 凭证需要先验证应用密码。</p>
+            <div class="form-group">
+              <input type="password" id="credentials-unlock-password" class="form-input" placeholder="请输入应用密码" autocomplete="current-password">
+            </div>
+            <p id="credentials-unlock-error" class="app-lock-error" style="display: none;"></p>
+            <button id="btn-credentials-unlock" class="btn btn-primary" type="button">
+              <span>验证并查看</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Security Tab -->
+      <div id="tab-security" class="tab-panel">
+        <div class="settings-section">
+          <h2 class="settings-section-title" data-i18n="appLockSectionTitle">应用密码锁</h2>
+          <p class="settings-section-description" data-i18n="appLockSectionDescription">启用后启动应用需要输入密码。本地缓存（缩略图、文件列表）会用该密码加密保存，忘记密码时可用当前存储桶的 Cloudflare 凭据找回。</p>
+
+          <div class="checkbox-group">
+            <input type="checkbox" id="app-lock-enabled" class="checkbox-input">
+            <label for="app-lock-enabled" class="checkbox-label" data-i18n="appLockEnableLabel">启用应用密码锁</label>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="app-lock-current-password">当前密码</label>
+            <input type="password" id="app-lock-current-password" class="form-input" placeholder="关闭密码锁或修改密码时需要填写">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="app-lock-settings-new-password">新密码</label>
+            <input type="password" id="app-lock-settings-new-password" class="form-input" placeholder="启用时设置密码 / 修改时填写新密码">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="app-lock-settings-confirm-password">确认新密码</label>
+            <input type="password" id="app-lock-settings-confirm-password" class="form-input" placeholder="请再次输入新密码">
+          </div>
+
+          <div class="btn-group">
+            <button id="btn-app-lock-change" class="btn btn-secondary" type="button">
+              <span data-i18n="appLockChangeButton">修改密码</span>
+            </button>
+          </div>
+        </div>
+
         <div class="settings-section">
           <h2 class="settings-section-title" data-i18n="securityTitle">安全设置</h2>
           <p class="settings-section-description" data-i18n="securityEncryptDescription">使用系统密钥加密存储您的 R2 凭证</p>
-          
+
           <div class="checkbox-group">
             <input type="checkbox" id="encrypt-credentials" class="checkbox-input" checked>
             <label for="encrypt-credentials" class="checkbox-label" data-i18n="securityEncryptCredentials">加密存储凭证</label>
           </div>
-          
+
           <div class="btn-group">
             <button id="btn-clear-credentials" class="btn btn-danger" type="button">
               <span data-i18n="securityClearCredentials">清除已保存的凭证</span>
@@ -867,16 +1007,6 @@
         </div>
       </div>
     </div>
-    
-    <!-- Footer -->
-    <footer class="settings-footer">
-      <button id="btn-cancel" class="btn btn-secondary" type="button">
-        <span data-i18n="settingsButtonCancel">取消</span>
-      </button>
-      <button id="btn-save" class="btn btn-primary" type="button">
-        <span data-i18n="settingsButtonSave">保存设置</span>
-      </button>
-    </footer>
     
     <!-- Notification container -->
     <div id="notification-container"></div>

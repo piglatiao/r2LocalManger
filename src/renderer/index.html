@@ -170,9 +170,83 @@
     
     <!-- 通知容器 -->
     <div id="notification-container"></div>
+
+    <!-- 应用密码锁 -->
+    <div id="app-lock-overlay" class="app-lock-overlay" style="display: none;">
+      <div class="app-lock-panel">
+        <div class="app-lock-header">
+          <span class="app-lock-icon">🔒</span>
+          <h2 class="app-lock-title" data-i18n="appLockTitle">应用已锁定</h2>
+          <p class="app-lock-subtitle" data-i18n="appLockSubtitle">请输入密码以继续使用</p>
+        </div>
+
+        <!-- 解锁表单 -->
+        <div id="app-lock-unlock-view">
+          <div class="form-group">
+            <input type="password" id="app-lock-password" class="form-input" placeholder="请输入密码" autocomplete="current-password">
+          </div>
+          <p id="app-lock-error" class="app-lock-error" style="display: none;"></p>
+          <button id="btn-app-lock-unlock" class="btn btn-primary app-lock-btn" type="button">
+            <span data-i18n="appLockUnlockButton">解锁</span>
+          </button>
+          <button id="btn-app-lock-forgot" class="app-lock-link" type="button">
+            <span data-i18n="appLockForgotLink">忘记密码？</span>
+          </button>
+        </div>
+
+        <!-- 找回密码表单 -->
+        <div id="app-lock-reset-view" style="display: none;">
+          <p class="app-lock-hint" data-i18n="appLockResetHint">验证当前存储桶的 Cloudflare 凭据后即可重设密码。重设后本地缓存会清空并重新生成。</p>
+          <div class="form-group">
+            <label class="form-label" for="app-lock-account-id">Cloudflare Account ID</label>
+            <input type="text" id="app-lock-account-id" class="form-input" placeholder="请输入 Cloudflare Account ID">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="app-lock-api-token">Cloudflare API Token</label>
+            <input type="password" id="app-lock-api-token" class="form-input" placeholder="请输入 Cloudflare API Token">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="app-lock-new-password">新密码</label>
+            <input type="password" id="app-lock-new-password" class="form-input" placeholder="请输入新密码" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="app-lock-confirm-password">确认新密码</label>
+            <input type="password" id="app-lock-confirm-password" class="form-input" placeholder="请再次输入新密码" autocomplete="new-password">
+          </div>
+          <p id="app-lock-reset-error" class="app-lock-error" style="display: none;"></p>
+          <button id="btn-app-lock-reset" class="btn btn-primary app-lock-btn" type="button">
+            <span data-i18n="appLockResetButton">验证并重设密码</span>
+          </button>
+          <button id="btn-app-lock-back" class="app-lock-link" type="button">
+            <span data-i18n="appLockBackLink">返回登录</span>
+          </button>
+        </div>
+
+        <!-- 首次设置密码 -->
+        <div id="app-lock-setup-view" style="display: none;">
+          <p class="app-lock-hint" data-i18n="appLockSetupHint">首次使用请先设置应用密码。设置后每次启动都需要输入密码才能进入，本地缓存也会用该密码加密；忘记密码时可用 Cloudflare 凭据找回。</p>
+          <div class="form-group">
+            <label class="form-label" for="app-lock-setup-password">应用密码</label>
+            <input type="password" id="app-lock-setup-password" class="form-input" placeholder="请设置应用密码" autocomplete="new-password">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="app-lock-setup-confirm">确认密码</label>
+            <input type="password" id="app-lock-setup-confirm" class="form-input" placeholder="请再次输入密码" autocomplete="new-password">
+          </div>
+          <p id="app-lock-setup-error" class="app-lock-error" style="display: none;"></p>
+          <button id="btn-app-lock-setup" class="btn btn-primary app-lock-btn" type="button">
+            <span data-i18n="appLockSetupButton">设置密码</span>
+          </button>
+          <button id="btn-app-lock-skip" class="app-lock-link" type="button">
+            <span data-i18n="appLockSkipLink">暂不设置</span>
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
-  
+
   <script src="../../i18n/zh-CN.js"></script>
+  <script src="appLock.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

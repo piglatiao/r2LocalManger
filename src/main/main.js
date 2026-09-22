@@ -23,12 +23,16 @@ const {
   ObjectListCacheService,
   DEFAULT_MAX_ENTRIES
 } = require('./application/ObjectListCacheService');
+const { LocalCryptoService } = require('./application/LocalCryptoService');
+const { AppLockService } = require('./application/AppLockService');
 
 let mainWindow;
 let storageService;
 let previewWindow = null;
 let thumbnailCache = null;
 let objectListCache = null;
+let localCrypto = null;
+let appLock = null;
 
 // 缩略图缓存相关常量
 const DEFAULT_THUMBNAIL_CACHE_MAX_MB = 512;
@@ -1053,7 +1057,8 @@ function getThumbnailCache() {
 
   try {
     const settings = readThumbnailCacheSettings();
-    thumbnailCache = new ThumbnailCacheService(app.getPath('userData'));
+    const { crypto } = ensureLocalSecurity();
+    thumbnailCache = new ThumbnailCacheService(app.getPath('userData'), { crypto });
     thumbnailCache.configure({
       enabled: settings.enabled,
       maxSizeBytes: settings.maxSizeMB * 1024 * 1024
@@ -1099,6 +1104,113 @@ function invalidateCurrentBucketName() {
 }
 
 /**
+ * 初始化本地安全体系（缓存加密密钥 + 应用密码锁）。
+ * @returns {{crypto: LocalCryptoService, lock: AppLockService}} 安全服务
+ */
+function ensureLocalSecurity() {
+  if (localCrypto && appLock) {
+    return { crypto: localCrypto, lock: appLock };
+  }
+
+  localCrypto = new LocalCryptoService();
+  appLock = new AppLockService(localCrypto);
+  appLock.bootstrap();
+
+  return { crypto: localCrypto, lock: appLock };
+}
+
+/**
+ * 一次性清理升级前遗留的明文缓存。
+ * 旧版本把缩略图直接写成 jpg、列表写成 json 明文，升级后必须清掉，
+ * 否则别人打开缓存目录仍能看到图片。仅在已持有密钥（已解锁）时执行。
+ * @returns {Promise<void>}
+ */
+async function migrateLegacyPlaintextCache() {
+  if (!localCrypto || !localCrypto.hasKey()) {
+    return;
+  }
+
+  try {
+    const Store = require('electron-store');
+    const settingsStore = new Store({ name: 'settings' });
+    if (settingsStore.get('cacheEncryptionMigrated', false) === true) {
+      return;
+    }
+
+    await resetLocalCachesAfterKeyChange();
+    settingsStore.set('cacheEncryptionMigrated', true);
+  } catch (error) {
+    ErrorLogger.logError(error, 'cache:migrateLegacyPlaintext');
+  }
+}
+
+/**
+ * 判断应用当前是否处于锁定状态（需要输入密码才能使用）。
+ * @returns {boolean} 是否锁定
+ */
+function isAppLocked() {
+  ensureLocalSecurity();
+  return appLock.getStatus().locked;
+}
+
+/**
+ * 清空所有本地缓存并重设缓存密钥。
+ * 改密 / 找回密码后旧密文已无法解密，必须清空重新生成。
+ */
+async function resetLocalCachesAfterKeyChange() {
+  const cache = getThumbnailCache();
+  const listCache = getObjectListCache();
+
+  if (cache) {
+    await cache.clear().catch(() => {});
+  }
+  if (listCache) {
+    await listCache.clear().catch(() => {});
+  }
+
+  broadcastCacheCleared();
+}
+
+/**
+ * 校验 Cloudflare 凭据是否有效（用于找回密码时的身份验证）。
+ * @param {string} accountId - Cloudflare Account ID
+ * @param {string} apiToken - Cloudflare API Token
+ * @returns {Promise<{success: boolean, userMessage?: string}>} 校验结果
+ */
+async function validateCloudflareIdentity(accountId, apiToken) {
+  const normalizedAccountId = String(accountId || '').trim();
+  const normalizedToken = String(apiToken || '').trim();
+
+  if (!normalizedAccountId || !normalizedToken) {
+    return { success: false, userMessage: '请填写 Cloudflare Account ID 与 API Token' };
+  }
+
+  // 必须与本机已配置的 Account ID 一致，避免用任意账号重置本机密码
+  const localAccountId = String(getR2Settings().cloudflareAccountId || '').trim();
+  if (localAccountId && normalizedAccountId !== localAccountId) {
+    return { success: false, userMessage: 'Account ID 与本机配置不一致，无法重置密码' };
+  }
+
+  try {
+    await callCloudflareApi({
+      method: 'GET',
+      apiToken: normalizedToken,
+      accountId: normalizedAccountId,
+      path: '/r2/buckets',
+      includeAccountPath: true
+    });
+
+    return { success: true };
+  } catch (error) {
+    ErrorLogger.logError(error, 'appLock:validateCloudflareIdentity');
+    return {
+      success: false,
+      userMessage: 'Cloudflare 凭据校验失败，请确认 Account ID 与 API Token 是否正确'
+    };
+  }
+}
+
+/**
  * 读取对象列表缓存配置。
  * @returns {{enabled: boolean}} 配置
  */
@@ -1123,7 +1235,8 @@ function getObjectListCache() {
 
   try {
     const settings = readObjectListCacheSettings();
-    objectListCache = new ObjectListCacheService(app.getPath('userData'));
+    const { crypto } = ensureLocalSecurity();
+    objectListCache = new ObjectListCacheService(app.getPath('userData'), { crypto });
     objectListCache.configure({
       enabled: settings.enabled,
       maxEntries: DEFAULT_MAX_ENTRIES,
@@ -1549,9 +1662,15 @@ app.on('ready', async () => {
   // Register settings handlers
   registerSettingsHandlers();
 
+  // 初始化本地安全体系（决定是否处于锁定状态）
+  ensureLocalSecurity();
+
   // 初始化本地缓存（缩略图 + 对象列表）
   getThumbnailCache();
   getObjectListCache();
+
+  // 清理升级前遗留的明文缓存（仅一次）
+  migrateLegacyPlaintextCache();
 
   // 隐藏应用级默认菜单，避免顶部显示 File / Edit / View 等框架菜单。
   Menu.setApplicationMenu(null);
@@ -2564,6 +2683,150 @@ function registerIPCHandlers() {
     }
   });
 
+  // ==================== App Lock ====================
+
+  ipcMain.handle('appLock:getStatus', async (event) => {
+    try {
+      ensureLocalSecurity();
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:getStatus');
+      return { success: true, data: { enabled: false, hasPassword: false, locked: false, needsSetup: false } };
+    }
+  });
+
+  // 首次设置密码
+  ipcMain.handle('appLock:setup', async (event, password) => {
+    try {
+      ensureLocalSecurity();
+      await appLock.applyNewPassword(password, true);
+      // 密钥从随机密钥切换到密码派生密钥，旧密文已不可解，清空重建
+      await resetLocalCachesAfterKeyChange();
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:setup');
+      return {
+        success: false,
+        error: { message: error.message, userMessage: error.userMessage || '设置密码失败' }
+      };
+    }
+  });
+
+  // 解锁
+  ipcMain.handle('appLock:unlock', async (event, password) => {
+    try {
+      ensureLocalSecurity();
+      const result = await appLock.unlock(password);
+      if (!result.success) {
+        return { success: false, error: { message: 'Unlock failed', userMessage: result.userMessage } };
+      }
+
+      // 解锁后才拿得到密钥，此时补做一次明文缓存清理
+      await migrateLegacyPlaintextCache();
+
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:unlock');
+      return { success: false, error: { message: error.message, userMessage: '解锁失败' } };
+    }
+  });
+
+  // 仅校验密码（用于查看敏感配置前的身份确认，不改变锁定状态）
+  ipcMain.handle('appLock:verify', async (event, password) => {
+    try {
+      ensureLocalSecurity();
+      const matched = await appLock.verifyPassword(password);
+      if (!matched) {
+        return { success: false, error: { message: 'Verify failed', userMessage: '密码错误，请重试' } };
+      }
+      return { success: true };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:verify');
+      return { success: false, error: { message: error.message, userMessage: '校验密码失败' } };
+    }
+  });
+
+  // 修改密码（需要原密码）
+  ipcMain.handle('appLock:change', async (event, payload) => {
+    try {
+      ensureLocalSecurity();
+      const result = await appLock.changePassword(payload?.currentPassword, payload?.newPassword);
+      if (!result.success) {
+        return { success: false, error: { message: 'Change failed', userMessage: result.userMessage } };
+      }
+      // 密钥变更，旧缓存密文已不可解，直接清空重建
+      await resetLocalCachesAfterKeyChange();
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:change');
+      return {
+        success: false,
+        error: { message: error.message, userMessage: error.userMessage || '修改密码失败' }
+      };
+    }
+  });
+
+  // 关闭 / 开启密码锁
+  ipcMain.handle('appLock:setEnabled', async (event, payload) => {
+    try {
+      ensureLocalSecurity();
+      const enable = Boolean(payload?.enabled);
+
+      if (enable) {
+        await appLock.enable(payload?.password);
+        await resetLocalCachesAfterKeyChange();
+      } else {
+        const result = await appLock.disable(payload?.password);
+        if (!result.success) {
+          return { success: false, error: { message: 'Disable failed', userMessage: result.userMessage } };
+        }
+      }
+
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:setEnabled');
+      return {
+        success: false,
+        error: { message: error.message, userMessage: error.userMessage || '更新密码锁状态失败' }
+      };
+    }
+  });
+
+  // 暂不设置密码
+  ipcMain.handle('appLock:dismissSetup', async (event) => {
+    try {
+      ensureLocalSecurity();
+      appLock.dismissSetup();
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:dismissSetup');
+      return { success: true };
+    }
+  });
+
+  // 忘记密码：校验 Cloudflare 身份后重设
+  ipcMain.handle('appLock:reset', async (event, payload) => {
+    try {
+      ensureLocalSecurity();
+
+      const identity = await validateCloudflareIdentity(payload?.accountId, payload?.apiToken);
+      if (!identity.success) {
+        return { success: false, error: { message: 'Identity check failed', userMessage: identity.userMessage } };
+      }
+
+      await appLock.applyNewPassword(payload?.newPassword, true);
+      await resetLocalCachesAfterKeyChange();
+
+      return { success: true, data: appLock.getStatus() };
+    } catch (error) {
+      ErrorLogger.logError(error, 'appLock:reset');
+      return {
+        success: false,
+        error: { message: error.message, userMessage: error.userMessage || '重置密码失败' }
+      };
+    }
+  });
+
   // Handler for revealing the thumbnail cache directory
   ipcMain.handle('cache:openLocation', async (event) => {
     try {
@@ -2662,9 +2925,9 @@ function createSettingsWindow() {
   }
   
   settingsWindow = new BrowserWindow({
-    width: 600,
-    height: 550,
-    minWidth: 500,
+    width: 680,
+    height: 580,
+    minWidth: 560,
     minHeight: 400,
     title: UI_TEXT.settingsWindowTitle || '设置',
     parent: mainWindow,

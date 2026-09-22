@@ -60,11 +60,14 @@ function extensionForContentType(contentType) {
 class ThumbnailCacheService {
   /**
    * @param {string} rootDir - 缓存根目录的父目录（通常传 app.getPath('userData')）
+   * @param {Object} [options] - 选项
+   * @param {Object} [options.crypto] - LocalCryptoService 实例；提供后落盘内容会被加密
    */
-  constructor(rootDir) {
+  constructor(rootDir, options = {}) {
     this.rootDir = path.join(String(rootDir || '.'), CACHE_DIR_NAME);
     this.indexFilePath = path.join(this.rootDir, INDEX_FILE_NAME);
 
+    this.crypto = options.crypto || null;
     this.enabled = true;
     this.maxSizeBytes = DEFAULT_MAX_SIZE_BYTES;
 
@@ -164,12 +167,30 @@ class ThumbnailCacheService {
   }
 
   /**
+   * 缓存是否可用：启用且（无加密器或已解锁持有密钥）。
+   * 未解锁时不读写，避免把明文内容写进缓存目录。
+   * @private
+   * @returns {boolean} 是否可用
+   */
+  _canUseCache() {
+    if (!this.enabled) {
+      return false;
+    }
+
+    if (this.crypto && !this.crypto.hasKey()) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
    * 读取缓存条目。
    * @param {Object} meta - 对象元信息（bucket/key/size/lastModified/etag）
    * @returns {Promise<{buffer: Buffer, contentType: string, cached: boolean}|null>} 缓存内容，未命中返回 null
    */
   async get(meta) {
-    if (!this.enabled) {
+    if (!this._canUseCache()) {
       return null;
     }
 
@@ -182,7 +203,14 @@ class ThumbnailCacheService {
     }
 
     try {
-      const buffer = await fs.readFile(path.join(this.rootDir, entry.file));
+      const raw = await fs.readFile(path.join(this.rootDir, entry.file));
+      const buffer = this.crypto ? this.crypto.decrypt(raw) : raw;
+      if (!buffer) {
+        // 密钥不匹配（改过密码）或内容损坏：丢弃该条目
+        await this._removeEntry(id);
+        return null;
+      }
+
       entry.accessedAt = Date.now();
       this._scheduleFlush();
 
@@ -206,7 +234,7 @@ class ThumbnailCacheService {
    * @returns {Promise<boolean>} 是否写入成功
    */
   async put(meta, buffer, contentType = 'image/jpeg') {
-    if (!this.enabled || !buffer || !buffer.length) {
+    if (!this._canUseCache() || !buffer || !buffer.length) {
       return false;
     }
 
@@ -216,9 +244,10 @@ class ThumbnailCacheService {
     const now = Date.now();
     const file = `${id}${extensionForContentType(contentType)}`;
     const targetPath = path.join(this.rootDir, file);
+    const stored = this.crypto ? this.crypto.encrypt(buffer) : buffer;
 
     try {
-      await fs.writeFile(targetPath, buffer);
+      await fs.writeFile(targetPath, stored);
     } catch (error) {
       return false;
     }
@@ -228,7 +257,7 @@ class ThumbnailCacheService {
       file,
       bucket: String(meta?.bucket || ''),
       key: String(meta?.key || ''),
-      bytes: buffer.length,
+      bytes: stored.length,
       contentType: String(contentType || 'image/jpeg'),
       createdAt: now,
       accessedAt: now

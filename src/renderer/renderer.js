@@ -3514,5 +3514,26 @@ async function handleDroppedFiles(files) {
   await loadObjectList({ force: true });
 }
 
+/**
+ * 启动应用：先过密码锁，再执行初始化。
+ */
+async function bootstrapApp() {
+  if (!window.appLockScreen) {
+    init();
+    return;
+  }
+
+  try {
+    await window.appLockScreen.bootstrap({
+      start: async () => {
+        init();
+      }
+    });
+  } catch (error) {
+    console.error('应用密码锁初始化失败，已直接进入应用:', error);
+    init();
+  }
+}
+
 // 页面加载完成后初始化
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', bootstrapApp);

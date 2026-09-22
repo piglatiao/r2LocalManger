@@ -335,6 +335,7 @@ var UI_TEXT = {
   settingsTabCredentials: '凭证配置',
   settingsTabBucket: '存储桶设置',
   settingsTabCache: '缓存设置',
+  settingsTabSecurity: '安全与密码',
 
   // Thumbnail cache settings
   cacheTitle: '缩略图缓存',
@@ -347,6 +348,22 @@ var UI_TEXT = {
   cacheCountLabel: '缩略图条目',
   cacheListCountLabel: '已缓存目录',
   cacheDirectoryLabel: '缓存目录',
+  // App lock
+  appLockTitle: '应用已锁定',
+  appLockSubtitle: '请输入密码以继续使用',
+  appLockUnlockButton: '解锁',
+  appLockForgotLink: '忘记密码？',
+  appLockBackLink: '返回登录',
+  appLockResetHint: '验证当前存储桶的 Cloudflare 凭据后即可重设密码。重设后本地缓存会清空并重新生成。',
+  appLockResetButton: '验证并重设密码',
+  appLockSetupHint: '配置已完成。设置应用密码后，下次启动需要输入密码才能进入；密码经过加密保存，忘记时可用 Cloudflare 凭据找回。',
+  appLockSetupButton: '设置密码',
+  appLockSkipLink: '暂不设置',
+  appLockSectionTitle: '应用密码锁',
+  appLockSectionDescription: '启用后启动应用需要输入密码。本地缓存（缩略图、文件列表）会用该密码加密保存，忘记密码时可用当前存储桶的 Cloudflare 凭据找回。',
+  appLockEnableLabel: '启用应用密码锁',
+  appLockChangeButton: '修改密码',
+
   cacheClearButton: '清理缓存',
   cacheOpenDirectoryButton: '打开缓存目录',
   cacheRefreshButton: '刷新状态',

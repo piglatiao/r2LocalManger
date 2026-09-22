@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ThumbnailCacheService, buildCacheId } = require('./ThumbnailCacheService');
+const { LocalCryptoService, generateKey } = require('./LocalCryptoService');
 
 describe('ThumbnailCacheService', () => {
   let rootDir;
@@ -159,6 +160,57 @@ describe('ThumbnailCacheService', () => {
       expect(stats.directory).toBe(path.join(rootDir, 'thumbnail-cache'));
       expect(stats.maxSizeBytes).toBe(20 * 1024 * 1024);
       expect(stats.enabled).toBe(true);
+    });
+  });
+
+  describe('加密存储', () => {
+    test('落盘内容不含明文，读取时自动解密', async () => {
+      const crypto = new LocalCryptoService();
+      crypto.setKey(generateKey());
+      const secureCache = new ThumbnailCacheService(rootDir, { crypto });
+      secureCache.configure({ enabled: true, maxSizeBytes: 20 * 1024 * 1024 });
+      await secureCache.init();
+
+      // 使用可识别的图片魔数，确保能验证"磁盘上没有明文"
+      const secret = Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF, 0xE0]), Buffer.from('SECRET-IMAGE-BYTES')]);
+      await secureCache.put(buildMeta(), secret, 'image/jpeg');
+
+      const files = fs.readdirSync(secureCache.rootDir).filter(f => f !== 'index.json');
+      expect(files).toHaveLength(1);
+
+      const rawOnDisk = fs.readFileSync(path.join(secureCache.rootDir, files[0]));
+      expect(rawOnDisk.includes(secret)).toBe(false);
+      expect(rawOnDisk.includes(Buffer.from('SECRET-IMAGE-BYTES'))).toBe(false);
+      expect(crypto.isEncrypted(rawOnDisk)).toBe(true);
+
+      const hit = await secureCache.get(buildMeta());
+      expect(hit).not.toBeNull();
+      expect(hit.buffer.equals(secret)).toBe(true);
+    });
+
+    test('未持有密钥时不写入也不读取（避免明文落盘）', async () => {
+      const crypto = new LocalCryptoService();
+      const secureCache = new ThumbnailCacheService(rootDir, { crypto });
+      await secureCache.init();
+
+      expect(await secureCache.put(buildMeta(), Buffer.from('plain'), 'image/jpeg')).toBe(false);
+      expect(await secureCache.get(buildMeta())).toBeNull();
+
+      const files = fs.readdirSync(secureCache.rootDir).filter(f => f !== 'index.json');
+      expect(files).toHaveLength(0);
+    });
+
+    test('更换密钥后旧缓存自动失效而不是返回乱码', async () => {
+      const crypto = new LocalCryptoService();
+      crypto.setKey(generateKey());
+      const secureCache = new ThumbnailCacheService(rootDir, { crypto });
+      await secureCache.init();
+
+      await secureCache.put(buildMeta(), Buffer.from('old-key-data'), 'image/jpeg');
+      expect(await secureCache.get(buildMeta())).not.toBeNull();
+
+      crypto.setKey(generateKey());
+      expect(await secureCache.get(buildMeta())).toBeNull();
     });
   });
 });
