@@ -12,10 +12,23 @@ var UI_TEXT = window.UI_TEXT || {};
 
 // IPC API 封装
 const electronAPI = {
-  listObjects: async (prefix = '') => {
-    const result = await ipcRenderer.invoke('storage:list', prefix);
+  /**
+   * 获取对象列表。
+   * @param {string} prefix - 目录前缀
+   * @param {{force?: boolean}} [options] - 选项；force 为 true 时跳过本地缓存强制拉取远端
+   * @returns {Promise<{objects: Array<Object>, fromCache: boolean, cachedAt?: number}>} 列表结果与来源
+   */
+  listObjects: async (prefix = '', options = {}) => {
+    const result = await ipcRenderer.invoke('storage:list', {
+      prefix,
+      force: Boolean(options.force)
+    });
     if (!result.success) throw result.error;
-    return result.data;
+    return {
+      objects: result.data || [],
+      fromCache: Boolean(result.fromCache),
+      cachedAt: result.cachedAt
+    };
   },
 
   syncBucketState: async (payload = {}) => {
@@ -121,12 +134,39 @@ const electronAPI = {
     return result.data;
   },
 
-  getThumbnail: async (key) => {
-    const result = await ipcRenderer.invoke('storage:thumbnail', key);
+  /**
+   * 读取远端缩略图（未命中本地缓存时才会真正联网）。
+   * @param {{key: string, size?: number, lastModified?: string, etag?: string}} meta - 对象元信息
+   * @returns {Promise<Object>} 缩略图数据
+   */
+  getThumbnail: async (meta) => {
+    const result = await ipcRenderer.invoke('storage:thumbnail', meta);
     if (!result.success) throw result.error;
     return result.data;
   },
-  
+
+  /**
+   * 只读取本地磁盘缓存，不访问网络。
+   * @param {{key: string, size?: number, lastModified?: string, etag?: string}} meta - 对象元信息
+   * @returns {Promise<Object|null>} 缓存内容，未命中为 null
+   */
+  getCachedThumbnail: async (meta) => {
+    const result = await ipcRenderer.invoke('thumbnail:get', meta);
+    if (!result.success) throw result.error;
+    return result.data;
+  },
+
+  /**
+   * 把渲染进程生成的缩略图（如视频首帧）写回本地缓存。
+   * @param {Object} payload - 元信息 + base64 内容
+   * @returns {Promise<boolean>} 是否写入成功
+   */
+  putThumbnailCache: async (payload) => {
+    const result = await ipcRenderer.invoke('thumbnail:put', payload);
+    if (!result.success) throw result.error;
+    return Boolean(result.data?.stored);
+  },
+
   copyUrl: async (key, format) => {
     const result = await ipcRenderer.invoke('storage:copy-url', key, format);
     if (!result.success) throw result.error;
@@ -256,6 +296,47 @@ const LARGE_UPLOAD_THRESHOLD_BYTES = 300 * 1024 * 1024;
 const thumbnailObjectUrls = new Map();
 const thumbnailRequests = new Map();
 
+// 缩略图加载并发上限：避免一次刷新把上百个请求同时打到 R2
+const THUMBNAIL_MAX_CONCURRENCY = 6;
+const thumbnailTaskQueue = [];
+let activeThumbnailTasks = 0;
+
+// 加载遮罩延迟：命中本地缓存时不弹遮罩，避免列表闪烁
+const LOADING_OVERLAY_DELAY_MS = 150;
+
+// 内存中保留的缩略图 object URL 上限（超出按最久未使用释放），
+// 保留一部分可以让切换目录来回时缩略图瞬时恢复
+const THUMBNAIL_MEMORY_CACHE_LIMIT = 400;
+
+/**
+ * 将缩略图加载任务加入并发队列。
+ * @param {Function} task - 异步任务
+ * @returns {Promise<*>} 任务结果
+ */
+function enqueueThumbnailTask(task) {
+  return new Promise((resolve, reject) => {
+    const run = () => {
+      activeThumbnailTasks += 1;
+      Promise.resolve()
+        .then(task)
+        .then(resolve, reject)
+        .finally(() => {
+          activeThumbnailTasks -= 1;
+          const next = thumbnailTaskQueue.shift();
+          if (next) {
+            next();
+          }
+        });
+    };
+
+    if (activeThumbnailTasks < THUMBNAIL_MAX_CONCURRENCY) {
+      run();
+    } else {
+      thumbnailTaskQueue.push(run);
+    }
+  });
+}
+
 /**
  * 初始化应用
  */
@@ -339,6 +420,9 @@ function init() {
   
   // 监听来自主进程的错误恢复事件
   setupErrorRecoveryListeners();
+
+  // 监听缓存清理事件：设置页清空缓存后同步释放内存中的缩略图
+  ipcRenderer.on('cache:cleared', handleThumbnailCacheCleared);
 
   // 监听来自设置页（内嵌 iframe）的关闭消息
   window.addEventListener('message', handleSettingsEmbeddedMessage);
@@ -1075,17 +1159,29 @@ async function loadObjectList(options = {}) {
     listStatusText: '正在加载对象列表...',
     ...options
   };
-  const { syncBucketStateFirst = false, bucket = '' } = normalizedOptions;
+  const { syncBucketStateFirst = false, bucket = '', force = false } = normalizedOptions;
   const requestedPrefix = Object.prototype.hasOwnProperty.call(normalizedOptions, 'prefix')
     ? normalizedOptions.prefix
     : state.currentPrefix;
   const previousPrefix = state.currentPrefix;
   state.currentPrefix = normalizeFolderPrefix(requestedPrefix);
   renderFolderNavigation();
-  showLoading(normalizedOptions.loadingText);
+  // 命中本地缓存时通常几十毫秒就返回，延迟弹遮罩避免列表闪烁
+  const loadingTimer = setTimeout(() => {
+    showLoading(normalizedOptions.loadingText);
+    updateLoadingText(normalizedOptions.loadingText);
+  }, LOADING_OVERLAY_DELAY_MS);
   updateStatus(normalizedOptions.loadingText);
   updateStatus(UI_TEXT.statusLoading || '正在加载...');
-  
+
+  /**
+   * 取消延迟遮罩，确保快速返回时不显示加载态。
+   */
+  const cancelLoadingOverlay = () => {
+    clearTimeout(loadingTimer);
+    hideLoading();
+  };
+
   // 清除选择状态
   clearSelection();
   
@@ -1132,22 +1228,28 @@ async function loadObjectList(options = {}) {
         updateObjectCount(0);
         updateStatus(UI_TEXT.statusReady || '就绪');
         showEmptyState();
+        cancelLoadingOverlay();
         return;
       }
     }
 
-    // 调用 IPC 获取对象列表
+    // 调用 IPC 获取对象列表（非强制刷新时优先读本地缓存）
     updateStatus(normalizedOptions.listStatusText);
     updateLoadingText(normalizedOptions.listStatusText);
-    const objects = await window.electronAPI.listObjects(state.currentPrefix);
-    state.objects = objects || [];
+    const listResult = await window.electronAPI.listObjects(state.currentPrefix, { force });
+    const objects = listResult?.objects || [];
+    state.objects = objects;
     cleanupStaleThumbnailObjectUrls(state.objects);
 
     renderFolderNavigation();
     renderObjectList();
-    updateStatus(UI_TEXT.statusReady || '就绪');
+    updateStatus(
+      listResult?.fromCache
+        ? `${UI_TEXT.statusReady || '就绪'}（本地缓存，点击刷新可同步远端）`
+        : (UI_TEXT.statusReady || '就绪')
+    );
     updateObjectCount(state.objects.length);
-    
+
     if (state.objects.length === 0) {
       showEmptyState();
     }
@@ -1158,7 +1260,7 @@ async function loadObjectList(options = {}) {
     }
     state.isSyncingBucketState = false;
     renderBucketSwitch();
-    hideLoading();
+    cancelLoadingOverlay();
     console.error('加载对象列表失败:', error);
 
     if (shouldSuppressInitialStorageListError(error)) {
@@ -1183,7 +1285,7 @@ async function loadObjectList(options = {}) {
     return;
   } finally {
     state.hasCompletedInitialListLoad = true;
-    hideLoading();
+    cancelLoadingOverlay();
   }
 }
 
@@ -1749,8 +1851,14 @@ function requestThumbnailObjectUrl(objectInfo) {
     return pendingRequest;
   }
 
-  const request = window.electronAPI.getThumbnail(objectInfo.key).then(async (previewData) => {
-    const thumbnailUrl = await createThumbnailObjectUrl(previewData);
+  const request = enqueueThumbnailTask(async () => {
+    // 排队期间可能已被同一对象的其它单元格加载完成
+    const existingUrl = thumbnailObjectUrls.get(cacheKey);
+    if (existingUrl) {
+      return existingUrl;
+    }
+
+    const thumbnailUrl = await loadThumbnailObjectUrl(objectInfo);
     if (thumbnailUrl) {
       thumbnailObjectUrls.set(cacheKey, thumbnailUrl);
     }
@@ -1764,6 +1872,104 @@ function requestThumbnailObjectUrl(objectInfo) {
 
   thumbnailRequests.set(cacheKey, request);
   return request;
+}
+
+/**
+ * 加载单个缩略图：先查本地磁盘缓存，未命中才访问远端。
+ * @param {Object} objectInfo - 对象信息
+ * @returns {Promise<string>} 缩略图对象 URL，失败返回空字符串
+ */
+async function loadThumbnailObjectUrl(objectInfo) {
+  const meta = buildThumbnailMeta(objectInfo);
+
+  try {
+    const cached = await window.electronAPI.getCachedThumbnail(meta);
+    const cachedBuffer = normalizeBinaryContent(cached?.content);
+    if (cachedBuffer) {
+      const mimeType = cached?.metadata?.contentType || 'image/jpeg';
+      return URL.createObjectURL(new Blob([cachedBuffer], { type: mimeType }));
+    }
+  } catch (error) {
+    console.warn(`读取本地缩略图缓存失败: ${objectInfo.key}`, error);
+  }
+
+  const previewData = await window.electronAPI.getThumbnail(meta);
+  const buffer = normalizeBinaryContent(previewData?.content);
+  if (!buffer) {
+    return '';
+  }
+
+  const mimeType = previewData?.metadata?.contentType || 'application/octet-stream';
+  const blob = new Blob([buffer], { type: mimeType });
+
+  if (previewData?.type === 'video') {
+    const frameBlob = await extractVideoFrameBlob(blob);
+    if (!frameBlob) {
+      return '';
+    }
+
+    // 视频首帧由渲染进程抽取，抽完写回本地缓存，下次直接命中
+    storeThumbnailInCache(meta, frameBlob);
+    return URL.createObjectURL(frameBlob);
+  }
+
+  return URL.createObjectURL(blob);
+}
+
+/**
+ * 构造缩略图缓存元信息（与主进程缓存键保持一致）。
+ * @param {Object} objectInfo - 对象信息
+ * @returns {{key: string, size: string|number, lastModified: string, etag: string}} 元信息
+ */
+function buildThumbnailMeta(objectInfo) {
+  return {
+    key: String(objectInfo?.key || ''),
+    size: objectInfo?.size === undefined || objectInfo?.size === null ? '' : objectInfo.size,
+    lastModified: objectInfo?.lastModified || '',
+    etag: objectInfo?.etag || ''
+  };
+}
+
+/**
+ * 把渲染进程生成的缩略图（视频首帧）写回本地磁盘缓存。
+ * @param {Object} meta - 缓存元信息
+ * @param {Blob} blob - 缩略图内容
+ */
+function storeThumbnailInCache(meta, blob) {
+  blobToBase64(blob)
+    .then((base64) => {
+      if (!base64) {
+        return false;
+      }
+
+      return window.electronAPI.putThumbnailCache({
+        ...meta,
+        content: base64,
+        contentType: blob.type || 'image/jpeg'
+      });
+    })
+    .catch((error) => {
+      console.warn('写入缩略图缓存失败:', error);
+      return false;
+    });
+}
+
+/**
+ * 将 Blob 转换为 base64 字符串（不含 data URL 前缀）。
+ * @param {Blob} blob - 待转换内容
+ * @returns {Promise<string>} base64 字符串
+ */
+function blobToBase64(blob) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const commaIndex = result.indexOf(',');
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : '');
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(blob);
+  });
 }
 
 /**
@@ -1785,34 +1991,11 @@ function applyThumbnailToCell(previewElement, thumbnailUrl, filename) {
 }
 
 /**
- * 将预览返回的二进制内容转换为本地对象 URL。
- * 视频文件会先提取一帧，再生成图片对象 URL。
- * @param {{content: Buffer|Uint8Array|ArrayBuffer|Object, metadata?: Object}} previewData - 预览数据
- * @returns {Promise<string>} 对象 URL
- */
-async function createThumbnailObjectUrl(previewData) {
-  const buffer = normalizeBinaryContent(previewData?.content);
-  if (!buffer) {
-    return '';
-  }
-
-  const mediaType = previewData?.type || '';
-  const mimeType = previewData?.metadata?.contentType || 'application/octet-stream';
-  const blob = new Blob([buffer], { type: mimeType });
-
-  if (mediaType === 'video') {
-    return await extractVideoFrameObjectUrl(blob);
-  }
-
-  return URL.createObjectURL(blob);
-}
-
-/**
- * 从视频 Blob 中提取一帧，并生成图片对象 URL。
+ * 从视频 Blob 中提取一帧图片。
  * @param {Blob} videoBlob - 视频 Blob
- * @returns {Promise<string>} 视频帧对象 URL
+ * @returns {Promise<Blob|null>} 视频帧图片，失败返回 null
  */
-function extractVideoFrameObjectUrl(videoBlob) {
+function extractVideoFrameBlob(videoBlob) {
   return new Promise((resolve) => {
     const sourceUrl = URL.createObjectURL(videoBlob);
     const video = document.createElement('video');
@@ -1836,7 +2019,7 @@ function extractVideoFrameObjectUrl(videoBlob) {
 
       settled = true;
       cleanup();
-      resolve(result || '');
+      resolve(result || null);
     };
 
     video.onloadedmetadata = () => {
@@ -1858,15 +2041,15 @@ function extractVideoFrameObjectUrl(videoBlob) {
           context.drawImage(video, 0, 0, canvas.width, canvas.height);
           canvas.toBlob((frameBlob) => {
             if (!frameBlob) {
-              finish('');
+              finish(null);
               return;
             }
 
-            finish(URL.createObjectURL(frameBlob));
+            finish(frameBlob);
           }, 'image/jpeg', 0.82);
         } catch (error) {
           console.error('提取视频缩略帧失败:', error);
-          finish('');
+          finish(null);
         }
       };
 
@@ -1878,7 +2061,7 @@ function extractVideoFrameObjectUrl(videoBlob) {
       }
     };
 
-    video.onerror = () => finish('');
+    video.onerror = () => finish(null);
     video.src = sourceUrl;
     video.load();
   });
@@ -1924,24 +2107,53 @@ function getThumbnailCacheKey(objectInfo) {
 }
 
 /**
- * 清理已不在当前列表中的缩略图对象 URL，避免内存泄漏。
- * @param {Array<Object>} objects - 当前对象列表
+ * 回收缩略图对象 URL。
+ * 切换目录时不再立即释放旧目录的缩略图，而是按 LRU 保留最近一批，
+ * 这样来回切换目录（以及切桶切回来）时缩略图可以瞬时恢复。
+ * @param {Array<Object>} objects - 当前对象列表（用于刷新 LRU 顺序）
  */
 function cleanupStaleThumbnailObjectUrls(objects) {
-  const validCacheKeys = new Set((objects || []).map(getThumbnailCacheKey));
-
-  Array.from(thumbnailObjectUrls.keys()).forEach((cacheKey) => {
-    if (!validCacheKeys.has(cacheKey)) {
-      URL.revokeObjectURL(thumbnailObjectUrls.get(cacheKey));
+  // 当前列表里的键视为最新使用，Map 的插入顺序即 LRU 顺序
+  (objects || []).forEach((objectInfo) => {
+    const cacheKey = getThumbnailCacheKey(objectInfo);
+    const existingUrl = thumbnailObjectUrls.get(cacheKey);
+    if (existingUrl) {
       thumbnailObjectUrls.delete(cacheKey);
+      thumbnailObjectUrls.set(cacheKey, existingUrl);
     }
   });
 
-  Array.from(thumbnailRequests.keys()).forEach((cacheKey) => {
-    if (!validCacheKeys.has(cacheKey)) {
-      thumbnailRequests.delete(cacheKey);
+  while (thumbnailObjectUrls.size > THUMBNAIL_MEMORY_CACHE_LIMIT) {
+    const oldestKey = thumbnailObjectUrls.keys().next().value;
+    if (oldestKey === undefined) {
+      break;
     }
-  });
+
+    URL.revokeObjectURL(thumbnailObjectUrls.get(oldestKey));
+    thumbnailObjectUrls.delete(oldestKey);
+  }
+
+  // 已不在列表中的进行中请求直接丢弃，避免结果回来后写入无人引用的 URL
+  if (thumbnailRequests.size > THUMBNAIL_MEMORY_CACHE_LIMIT * 2) {
+    const validCacheKeys = new Set((objects || []).map(getThumbnailCacheKey));
+    Array.from(thumbnailRequests.keys()).forEach((cacheKey) => {
+      if (!validCacheKeys.has(cacheKey)) {
+        thumbnailRequests.delete(cacheKey);
+      }
+    });
+  }
+}
+
+/**
+ * 处理主进程广播的缓存清理事件。
+ * 释放内存中的缩略图对象 URL，并重新触发列表渲染以便重新加载。
+ */
+function handleThumbnailCacheCleared() {
+  cleanupAllThumbnailObjectUrls();
+
+  if (Array.isArray(state.objects) && state.objects.length > 0) {
+    renderObjectList();
+  }
 }
 
 /**
@@ -2038,7 +2250,7 @@ async function handleErrorWithRecovery(error, operation, retryCallback) {
       
       // 处理刷新操作
       if (result.action === 'REFRESH') {
-        await loadObjectList();
+        await loadObjectList({ force: true });
       }
       
       return;
@@ -2333,7 +2545,7 @@ async function handleUpload() {
     updateStatus(UI_TEXT.statusReady || '就绪');
     
     // 刷新列表
-    await loadObjectList();
+    await loadObjectList({ force: true });
   } catch (error) {
     hideProgress();
     console.error('上传失败:', error);
@@ -2531,7 +2743,7 @@ async function handleDelete() {
     updateStatus(UI_TEXT.statusReady || '就绪');
     
     // 刷新列表
-    await loadObjectList();
+    await loadObjectList({ force: true });
   } catch (error) {
     console.error('删除失败:', error);
     
@@ -2595,7 +2807,7 @@ async function handleBatchDelete(objects) {
     updateStatus(UI_TEXT.statusReady || '就绪');
     
     // 刷新列表
-    await loadObjectList();
+    await loadObjectList({ force: true });
   } catch (error) {
     hideProgress();
     console.error('批量删除失败:', error);
@@ -2615,6 +2827,7 @@ async function handleRefresh() {
   updateLoadingText('正在同步远端数据...');
   await loadObjectList({
     syncBucketStateFirst: true,
+    force: true,
     loadingText: '正在刷新列表...',
     syncStatusText: '正在同步远端数据...',
     listStatusText: '正在重新加载对象列表...'
@@ -2709,7 +2922,7 @@ function closeEmbeddedSettings(options = {}) {
   state.isSettingsEmbeddedOpen = false;
 
   if (reload) {
-    loadObjectList();
+    loadObjectList({ force: true });
   }
 }
 
@@ -3277,7 +3490,7 @@ async function handleDroppedFiles(files) {
   if (progressState.isCancelled) {
     showNotification(UI_TEXT.operationCancelled || '操作已取消', 'info');
     // 仍然刷新列表以显示已上传的文件
-    await loadObjectList();
+    await loadObjectList({ force: true });
     return;
   }
   
@@ -3298,7 +3511,7 @@ async function handleDroppedFiles(files) {
   }
   
   // 刷新列表
-  await loadObjectList();
+  await loadObjectList({ force: true });
 }
 
 // 页面加载完成后初始化

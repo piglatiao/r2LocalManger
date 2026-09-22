@@ -46,6 +46,11 @@ const electronAPI = {
   getManagedDomain: async (payload) => ipcRenderer.invoke('settings:getManagedDomain', payload),
   updateManagedDomain: async (payload) => ipcRenderer.invoke('settings:updateManagedDomain', payload),
   listAvailableDomains: async (payload) => ipcRenderer.invoke('settings:listAvailableDomains', payload),
+  getCacheSettings: async () => ipcRenderer.invoke('cache:getSettings'),
+  saveCacheSettings: async (payload) => ipcRenderer.invoke('cache:saveSettings', payload),
+  getCacheStats: async () => ipcRenderer.invoke('cache:stats'),
+  clearCache: async () => ipcRenderer.invoke('cache:clear'),
+  openCacheLocation: async () => ipcRenderer.invoke('cache:openLocation'),
   confirm: async (message) => {
     const result = await ipcRenderer.invoke('dialog:confirm', message);
     return result.confirmed;
@@ -101,6 +106,17 @@ const elements = {
   btnResetCustomDomain: document.getElementById('btn-reset-custom-domain'),
   btnCancel: document.getElementById('btn-cancel'),
   btnSave: document.getElementById('btn-save'),
+  thumbnailCacheEnabled: document.getElementById('thumbnail-cache-enabled'),
+  thumbnailCacheLimit: document.getElementById('thumbnail-cache-limit'),
+  objectListCacheEnabled: document.getElementById('object-list-cache-enabled'),
+  cacheUsed: document.getElementById('cache-used'),
+  cacheCount: document.getElementById('cache-count'),
+  cacheListCount: document.getElementById('cache-list-count'),
+  cacheDirectory: document.getElementById('cache-directory'),
+  cacheProgressBar: document.getElementById('cache-progress-bar'),
+  btnClearCache: document.getElementById('btn-clear-cache'),
+  btnOpenCacheDir: document.getElementById('btn-open-cache-dir'),
+  btnRefreshCacheStats: document.getElementById('btn-refresh-cache-stats'),
   notificationContainer: document.getElementById('notification-container')
 };
 
@@ -131,7 +147,18 @@ const state = {
   hasChanges: false,
   isTesting: false,
   isLoadingBuckets: false,
-  isLoadingZones: false
+  isLoadingZones: false,
+  cache: {
+    enabled: true,
+    maxSizeMB: 512,
+    listEnabled: true,
+    usedBytes: 0,
+    count: 0,
+    listCount: 0,
+    listUsedBytes: 0,
+    directory: ''
+  },
+  isClearingCache: false
 };
 
 function getInputValue(element, fallback = '') {
@@ -1412,10 +1439,235 @@ async function handleDeleteCustomDomain() {
   await loadBucketState({ bucket: state.r2Config.bucket, loadingText: '正在同步自定义域名列表...' });
 }
 
+/**
+ * 格式化字节数为可读文本。
+ * @param {number} bytes - 字节数
+ * @returns {string} 可读文本
+ */
+function formatCacheSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+/**
+ * 把缓存统计渲染到界面。
+ * @param {Object} stats - 缓存统计
+ */
+function renderCacheStats(stats) {
+  if (!stats) return;
+
+  state.cache = {
+    enabled: Boolean(stats.enabled),
+    maxSizeMB: Number(stats.maxSizeMB) || 512,
+    listEnabled: stats.listEnabled !== false,
+    usedBytes: Number(stats.usedBytes) || 0,
+    count: Number(stats.count) || 0,
+    listCount: Number(stats.listCount) || 0,
+    listUsedBytes: Number(stats.listUsedBytes) || 0,
+    directory: String(stats.directory || '')
+  };
+
+  if (elements.thumbnailCacheEnabled) {
+    elements.thumbnailCacheEnabled.checked = state.cache.enabled;
+  }
+  if (elements.objectListCacheEnabled) {
+    elements.objectListCacheEnabled.checked = state.cache.listEnabled;
+  }
+  if (elements.thumbnailCacheLimit) {
+    const limitValue = String(state.cache.maxSizeMB);
+    const hasOption = Array.from(elements.thumbnailCacheLimit.options)
+      .some(option => option.value === limitValue);
+    if (hasOption) {
+      elements.thumbnailCacheLimit.value = limitValue;
+    }
+  }
+  if (elements.cacheUsed) {
+    const maxBytes = state.cache.maxSizeMB * 1024 * 1024;
+    elements.cacheUsed.textContent = `${formatCacheSize(state.cache.usedBytes)} / ${formatCacheSize(maxBytes)}`;
+  }
+  if (elements.cacheCount) {
+    elements.cacheCount.textContent = `${state.cache.count} 个`;
+  }
+  if (elements.cacheListCount) {
+    const listSize = state.cache.listUsedBytes > 0
+      ? `（${formatCacheSize(state.cache.listUsedBytes)}）`
+      : '';
+    elements.cacheListCount.textContent = `${state.cache.listCount} 个${listSize}`;
+  }
+  if (elements.cacheDirectory) {
+    elements.cacheDirectory.textContent = state.cache.directory || '-';
+  }
+  if (elements.cacheProgressBar) {
+    const maxBytes = state.cache.maxSizeMB * 1024 * 1024;
+    const ratio = maxBytes > 0 ? Math.min(1, state.cache.usedBytes / maxBytes) : 0;
+    elements.cacheProgressBar.style.width = `${(ratio * 100).toFixed(1)}%`;
+    elements.cacheProgressBar.classList.toggle('near-limit', ratio >= 0.75 && ratio < 1);
+    elements.cacheProgressBar.classList.toggle('over-limit', ratio >= 1);
+  }
+}
+
+/**
+ * 读取缓存设置与占用情况。
+ * @param {Object} options - 选项
+ * @param {boolean} options.silent - 是否静默处理错误
+ * @returns {Promise<void>}
+ */
+async function loadCacheStats(options = {}) {
+  try {
+    const result = await electronAPI.getCacheStats();
+    if (!result.success) {
+      throw new Error(result.error?.message || 'Load cache stats failed');
+    }
+    renderCacheStats(result.data);
+  } catch (error) {
+    if (!options.silent) {
+      console.error('读取缓存状态失败:', error);
+      showNotification('读取缓存状态失败', 'error');
+    }
+  }
+}
+
+/**
+ * 保存缓存设置并立即生效。
+ * @param {{enabled?: boolean, maxSizeMB?: number}} payload - 待保存配置
+ * @returns {Promise<boolean>} 是否保存成功
+ */
+async function saveCacheSettings(payload) {
+  try {
+    const result = await electronAPI.saveCacheSettings(payload);
+    if (!result.success) {
+      throw new Error(result.error?.message || 'Save cache settings failed');
+    }
+    renderCacheStats(result.data);
+    return true;
+  } catch (error) {
+    console.error('保存缓存设置失败:', error);
+    showNotification('保存缓存设置失败', 'error');
+    return false;
+  }
+}
+
+/**
+ * 切换缩略图缓存开关。
+ */
+async function handleCacheEnabledChange() {
+  const enabled = Boolean(elements.thumbnailCacheEnabled?.checked);
+  const ok = await saveCacheSettings({
+    enabled,
+    maxSizeMB: state.cache.maxSizeMB,
+    listEnabled: state.cache.listEnabled
+  });
+  if (ok) {
+    showNotification(enabled ? '已启用缩略图缓存' : '已停用缩略图缓存', 'success');
+  }
+}
+
+/**
+ * 切换对象列表缓存开关。
+ */
+async function handleListCacheEnabledChange() {
+  const listEnabled = Boolean(elements.objectListCacheEnabled?.checked);
+  const ok = await saveCacheSettings({
+    enabled: state.cache.enabled,
+    maxSizeMB: state.cache.maxSizeMB,
+    listEnabled
+  });
+  if (ok) {
+    showNotification(listEnabled ? '已启用文件列表缓存' : '已停用文件列表缓存', 'success');
+  }
+}
+
+/**
+ * 修改缓存大小上限。
+ */
+async function handleCacheLimitChange() {
+  const maxSizeMB = Number(elements.thumbnailCacheLimit?.value) || state.cache.maxSizeMB;
+  const ok = await saveCacheSettings({
+    enabled: state.cache.enabled,
+    maxSizeMB,
+    listEnabled: state.cache.listEnabled
+  });
+  if (ok) {
+    showNotification(`缓存上限已设为 ${maxSizeMB >= 1024 ? `${maxSizeMB / 1024} GB` : `${maxSizeMB} MB`}`, 'success');
+  }
+}
+
+/**
+ * 清理全部缩略图缓存。
+ */
+async function handleClearCache() {
+  if (state.isClearingCache) return;
+
+  const confirmed = await electronAPI.confirm(
+    '确定要清理全部本地缓存（缩略图 + 文件列表）吗？清理后重新浏览时会再次从远端加载。'
+  );
+  if (!confirmed) return;
+
+  state.isClearingCache = true;
+  if (elements.btnClearCache) {
+    elements.btnClearCache.disabled = true;
+  }
+
+  try {
+    const result = await electronAPI.clearCache();
+    if (!result.success) {
+      throw new Error(result.error?.message || 'Clear cache failed');
+    }
+
+    const freedBytes = Number(result.data?.freedBytes || 0) + Number(result.data?.listFreedBytes || 0);
+    await loadCacheStats({ silent: true });
+    showNotification(
+      `缓存已清理${freedBytes > 0 ? `，释放 ${formatCacheSize(freedBytes)}` : ''}`,
+      'success'
+    );
+  } catch (error) {
+    console.error('清理缓存失败:', error);
+    showNotification('清理缓存失败', 'error');
+  } finally {
+    state.isClearingCache = false;
+    if (elements.btnClearCache) {
+      elements.btnClearCache.disabled = false;
+    }
+  }
+}
+
+/**
+ * 打开缓存目录。
+ */
+async function handleOpenCacheDir() {
+  try {
+    const result = await electronAPI.openCacheLocation();
+    if (!result.success) {
+      showNotification('打开缓存目录失败', 'error');
+    }
+  } catch (error) {
+    console.error('打开缓存目录失败:', error);
+    showNotification('打开缓存目录失败', 'error');
+  }
+}
+
 function bindEvents() {
   elements.tabNavItems.forEach(item => {
     item.addEventListener('click', () => handleTabClick(item));
   });
+
+  if (elements.thumbnailCacheEnabled) {
+    elements.thumbnailCacheEnabled.addEventListener('change', handleCacheEnabledChange);
+  }
+  if (elements.objectListCacheEnabled) {
+    elements.objectListCacheEnabled.addEventListener('change', handleListCacheEnabledChange);
+  }
+  if (elements.thumbnailCacheLimit) {
+    elements.thumbnailCacheLimit.addEventListener('change', handleCacheLimitChange);
+  }
+  if (elements.btnClearCache) elements.btnClearCache.addEventListener('click', handleClearCache);
+  if (elements.btnOpenCacheDir) elements.btnOpenCacheDir.addEventListener('click', handleOpenCacheDir);
+  if (elements.btnRefreshCacheStats) {
+    elements.btnRefreshCacheStats.addEventListener('click', () => loadCacheStats());
+  }
 
   if (elements.cloudflareAccountId) elements.cloudflareAccountId.addEventListener('input', handleCredentialInput);
   if (elements.cloudflareApiToken) elements.cloudflareApiToken.addEventListener('input', handleCredentialInput);
@@ -1502,6 +1754,7 @@ async function loadSettings() {
 
     renderAvailableDomains();
     await loadBucketState({ bucket: state.r2Config.bucket });
+    await loadCacheStats({ silent: true });
   } catch (error) {
     console.error('加载设置失败:', error);
     showNotification(UI_TEXT.credentialsLoadFailed || '加载设置失败', 'error');

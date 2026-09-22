@@ -13,10 +13,29 @@ const { StorageService, URLFormat } = require('./application/StorageService');
 const { ClipboardManager } = require('./infrastructure/ClipboardManager');
 const { ErrorLogger } = require('./application/ErrorLogger');
 const { ErrorHandler, ErrorAction } = require('./infrastructure/ErrorHandler');
+const {
+  ThumbnailCacheService,
+  DEFAULT_MAX_SIZE_BYTES,
+  MIN_MAX_SIZE_BYTES,
+  MAX_MAX_SIZE_BYTES
+} = require('./application/ThumbnailCacheService');
+const {
+  ObjectListCacheService,
+  DEFAULT_MAX_ENTRIES
+} = require('./application/ObjectListCacheService');
 
 let mainWindow;
 let storageService;
 let previewWindow = null;
+let thumbnailCache = null;
+let objectListCache = null;
+
+// 缩略图缓存相关常量
+const DEFAULT_THUMBNAIL_CACHE_MAX_MB = 512;
+const THUMBNAIL_MAX_DIMENSION = 320;
+const THUMBNAIL_JPEG_QUALITY = 80;
+const THUMBNAIL_MAX_SOURCE_BYTES = 64 * 1024 * 1024;
+const THUMBNAIL_RAW_CACHE_MAX_BYTES = 4 * 1024 * 1024;
 
 // 导出配置函数供其他模块使用
 module.exports = {};
@@ -856,6 +875,7 @@ function saveR2Settings(input = {}) {
 
   // 兼容历史字段：清理明文 API Token 存储，统一迁移至安全存储。
   settingsStore.delete('cfApiToken');
+  invalidateCurrentBucketName();
   storeSecretValue(credentialsStore, 'apiToken', settings.cloudflareApiToken || '');
 
   return settings;
@@ -972,6 +992,242 @@ function getStorageServiceOrThrow(operation) {
   error.operation = operation || 'unknown';
   error.code = 'SERVICE_NOT_READY';
   throw error;
+}
+
+// ==================== Thumbnail Cache ====================
+
+/**
+ * 读取缩略图缓存配置。
+ * @returns {{enabled: boolean, maxSizeMB: number}} 缓存配置
+ */
+function readThumbnailCacheSettings() {
+  try {
+    const Store = require('electron-store');
+    const settingsStore = new Store({ name: 'settings' });
+
+    const enabled = settingsStore.get('thumbnailCacheEnabled', true) !== false;
+    const rawMaxMb = Number(settingsStore.get('thumbnailCacheMaxSizeMB', DEFAULT_THUMBNAIL_CACHE_MAX_MB));
+    const maxSizeMB = Number.isFinite(rawMaxMb) && rawMaxMb > 0
+      ? Math.round(rawMaxMb)
+      : DEFAULT_THUMBNAIL_CACHE_MAX_MB;
+
+    return { enabled, maxSizeMB };
+  } catch {
+    return { enabled: true, maxSizeMB: DEFAULT_THUMBNAIL_CACHE_MAX_MB };
+  }
+}
+
+/**
+ * 持久化缩略图缓存配置。
+ * @param {{enabled?: boolean, maxSizeMB?: number}} input - 配置项
+ * @returns {{enabled: boolean, maxSizeMB: number}} 已保存的配置
+ */
+function writeThumbnailCacheSettings(input = {}) {
+  const current = readThumbnailCacheSettings();
+  const next = {
+    enabled: typeof input.enabled === 'boolean' ? input.enabled : current.enabled,
+    maxSizeMB: Number.isFinite(Number(input.maxSizeMB)) && Number(input.maxSizeMB) > 0
+      ? Math.min(
+        Math.round(MAX_MAX_SIZE_BYTES / (1024 * 1024)),
+        Math.max(Math.round(MIN_MAX_SIZE_BYTES / (1024 * 1024)), Math.round(Number(input.maxSizeMB)))
+      )
+      : current.maxSizeMB
+  };
+
+  const Store = require('electron-store');
+  const settingsStore = new Store({ name: 'settings' });
+  settingsStore.set('thumbnailCacheEnabled', next.enabled);
+  settingsStore.set('thumbnailCacheMaxSizeMB', next.maxSizeMB);
+
+  return next;
+}
+
+/**
+ * 获取（懒初始化）缩略图缓存服务。
+ * @returns {ThumbnailCacheService|null} 缓存服务实例
+ */
+function getThumbnailCache() {
+  if (thumbnailCache) {
+    return thumbnailCache;
+  }
+
+  try {
+    const settings = readThumbnailCacheSettings();
+    thumbnailCache = new ThumbnailCacheService(app.getPath('userData'));
+    thumbnailCache.configure({
+      enabled: settings.enabled,
+      maxSizeBytes: settings.maxSizeMB * 1024 * 1024
+    });
+    thumbnailCache.init().catch((error) => {
+      ErrorLogger.logError(error, 'thumbnailCache:init');
+    });
+  } catch (error) {
+    ErrorLogger.logError(error, 'thumbnailCache:create');
+    thumbnailCache = null;
+  }
+
+  return thumbnailCache;
+}
+
+// 当前桶名短期缓存：缩略图请求是高频调用，避免每个都重新解析一次设置文件。
+// 最多陈旧 1 秒，最坏情况只是缓存未命中（重新下载），不会读到错误的桶。
+let cachedBucketName = null;
+let cachedBucketNameAt = 0;
+const BUCKET_NAME_CACHE_TTL_MS = 1000;
+
+/**
+ * 读取当前桶名（带短期缓存）。
+ * @returns {string} 桶名
+ */
+function getCurrentBucketName() {
+  const now = Date.now();
+  if (cachedBucketName && now - cachedBucketNameAt < BUCKET_NAME_CACHE_TTL_MS) {
+    return cachedBucketName;
+  }
+
+  cachedBucketName = getR2Settings().bucket || '';
+  cachedBucketNameAt = now;
+  return cachedBucketName;
+}
+
+/**
+ * 使当前桶名缓存失效（切换桶 / 保存设置后调用）。
+ */
+function invalidateCurrentBucketName() {
+  cachedBucketName = null;
+  cachedBucketNameAt = 0;
+}
+
+/**
+ * 读取对象列表缓存配置。
+ * @returns {{enabled: boolean}} 配置
+ */
+function readObjectListCacheSettings() {
+  try {
+    const Store = require('electron-store');
+    const settingsStore = new Store({ name: 'settings' });
+    return { enabled: settingsStore.get('objectListCacheEnabled', true) !== false };
+  } catch {
+    return { enabled: true };
+  }
+}
+
+/**
+ * 获取（懒初始化）对象列表缓存服务。
+ * @returns {ObjectListCacheService|null} 缓存服务实例
+ */
+function getObjectListCache() {
+  if (objectListCache) {
+    return objectListCache;
+  }
+
+  try {
+    const settings = readObjectListCacheSettings();
+    objectListCache = new ObjectListCacheService(app.getPath('userData'));
+    objectListCache.configure({
+      enabled: settings.enabled,
+      maxEntries: DEFAULT_MAX_ENTRIES,
+      maxSizeBytes: DEFAULT_MAX_SIZE_BYTES
+    });
+    objectListCache.init().catch((error) => {
+      ErrorLogger.logError(error, 'objectListCache:init');
+    });
+  } catch (error) {
+    ErrorLogger.logError(error, 'objectListCache:create');
+    objectListCache = null;
+  }
+
+  return objectListCache;
+}
+
+/**
+ * 失效当前桶下的列表缓存（写操作后调用，保证列表一致性）。
+ * @param {string} prefix - 受影响的目录前缀；传 undefined 表示失效整个桶
+ */
+function invalidateObjectListCache(prefix) {
+  const cache = getObjectListCache();
+  if (!cache) return;
+
+  cache
+    .invalidate(getCurrentBucketName(), prefix)
+    .catch((error) => ErrorLogger.logError(error, 'objectListCache:invalidate'));
+}
+
+/**
+ * 标准化缩略图缓存元信息（兼容直接传 key 的旧调用）。
+ * @param {Object|string} payload - 元信息或对象 key
+ * @returns {{bucket: string, key: string, size: string, lastModified: string, etag: string}} 元信息
+ */
+function normalizeThumbnailMeta(payload) {
+  const source = typeof payload === 'string' ? { key: payload } : (payload || {});
+
+  return {
+    bucket: String(source.bucket || getCurrentBucketName() || ''),
+    key: String(source.key || ''),
+    size: source.size === undefined || source.size === null ? '' : String(source.size),
+    lastModified: source.lastModified || '',
+    etag: source.etag || ''
+  };
+}
+
+/**
+ * 将原始图片内容压成小尺寸 JPEG 缩略图。
+ * @param {Buffer} content - 原始图片字节
+ * @param {string} key - 对象 key（用于扩展名判断）
+ * @returns {{buffer: Buffer, contentType: string}|null} 缩略图内容，失败返回 null
+ */
+function encodeThumbnailImage(content, key) {
+  const ext = path.extname(String(key || '')).slice(1).toLowerCase();
+
+  // nativeImage 不支持矢量图，交给调用方按原始内容缓存
+  if (ext === 'svg' || !content || !content.length) {
+    return null;
+  }
+
+  try {
+    const { nativeImage } = require('electron');
+    let image = nativeImage.createFromBuffer(content);
+    if (!image || image.isEmpty()) {
+      return null;
+    }
+
+    const size = image.getSize();
+    const maxDimension = Math.max(Number(size.width) || 0, Number(size.height) || 0);
+
+    if (maxDimension > THUMBNAIL_MAX_DIMENSION) {
+      const ratio = THUMBNAIL_MAX_DIMENSION / maxDimension;
+      image = image.resize({
+        width: Math.max(1, Math.round(size.width * ratio)),
+        height: Math.max(1, Math.round(size.height * ratio)),
+        quality: 'better'
+      });
+    }
+
+    const buffer = image.toJPEG(THUMBNAIL_JPEG_QUALITY);
+    if (!buffer || !buffer.length) {
+      return null;
+    }
+
+    return { buffer, contentType: 'image/jpeg' };
+  } catch (error) {
+    ErrorLogger.logError(error, 'thumbnailCache:encode', { key });
+    return null;
+  }
+}
+
+/**
+ * 广播缓存已清空事件，通知所有窗口释放内存中的缩略图。
+ */
+function broadcastCacheCleared() {
+  try {
+    BrowserWindow.getAllWindows().forEach((window) => {
+      if (window && !window.isDestroyed()) {
+        window.webContents.send('cache:cleared');
+      }
+    });
+  } catch (error) {
+    ErrorLogger.logError(error, 'thumbnailCache:broadcastCleared');
+  }
 }
 
 /**
@@ -1293,6 +1549,10 @@ app.on('ready', async () => {
   // Register settings handlers
   registerSettingsHandlers();
 
+  // 初始化本地缓存（缩略图 + 对象列表）
+  getThumbnailCache();
+  getObjectListCache();
+
   // 隐藏应用级默认菜单，避免顶部显示 File / Edit / View 等框架菜单。
   Menu.setApplicationMenu(null);
 
@@ -1311,6 +1571,16 @@ app.on('ready', async () => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+// 退出前把缓存索引落盘
+app.on('before-quit', () => {
+  if (thumbnailCache) {
+    thumbnailCache.flush().catch(() => {});
+  }
+  if (objectListCache) {
+    objectListCache.flush().catch(() => {});
   }
 });
 
@@ -1593,15 +1863,40 @@ function registerDialogHandlers() {
  * Register all IPC handlers for storage operations
  */
 function registerIPCHandlers() {
-  // Handler for listing objects
-  ipcMain.handle('storage:list', async (event, prefix = '') => {
+  // Handler for listing objects (local cache first unless force refresh)
+  ipcMain.handle('storage:list', async (event, payload = '') => {
+    const request = typeof payload === 'string' ? { prefix: payload } : (payload || {});
+    const prefix = String(request.prefix || '');
+    const force = Boolean(request.force);
+
     try {
+      const cache = getObjectListCache();
+      const bucket = getCurrentBucketName();
+
+      // 非强制刷新时优先使用本地缓存：切换桶 / 切换目录走这里，秒出
+      if (cache && !force) {
+        const cached = await cache.get(bucket, prefix);
+        if (cached) {
+          return {
+            success: true,
+            data: cached.objects,
+            fromCache: true,
+            cachedAt: cached.cachedAt
+          };
+        }
+      }
+
       const activeStorageService = getStorageServiceOrThrow('list');
       const objects = await activeStorageService.listObjects(prefix);
-      return { success: true, data: objects };
+
+      if (cache && Array.isArray(objects)) {
+        await cache.put(bucket, prefix, objects);
+      }
+
+      return { success: true, data: objects, fromCache: false };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:list', { prefix });
-      
+
       // Get user-friendly message
       let userMessage = ErrorHandler.getUserMessage(error);
       if (error.code === 'SERVICE_NOT_READY' && lastStartupCheckResult && !lastStartupCheckResult.ok) {
@@ -1652,6 +1947,8 @@ function registerIPCHandlers() {
       };
 
       const result = await activeStorageService.uploadFile(filePath, onProgress, prefix);
+      // 写操作后失效列表缓存：写操作频率低，直接按桶失效最省心且不会读到脏列表
+      invalidateObjectListCache();
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:upload', { filePath, prefix });
@@ -1704,6 +2001,7 @@ function registerIPCHandlers() {
       };
 
       const result = await activeStorageService.uploadBuffer(name, nodeBuffer, type, onProgress);
+      invalidateObjectListCache();
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:upload-buffer', { name });
@@ -1781,6 +2079,7 @@ function registerIPCHandlers() {
     try {
       const activeStorageService = getStorageServiceOrThrow('delete');
       await activeStorageService.deleteFile(key);
+      invalidateObjectListCache();
       return { success: true };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:delete', { key });
@@ -1809,6 +2108,7 @@ function registerIPCHandlers() {
     try {
       const activeStorageService = getStorageServiceOrThrow('delete');
       const result = await activeStorageService.deleteFiles(keys);
+      invalidateObjectListCache();
       return { success: true, data: result };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:delete-batch', { keys });
@@ -1954,9 +2254,31 @@ function registerIPCHandlers() {
     }
   });
 
-  // Handler for loading media thumbnail data
-  ipcMain.handle('storage:thumbnail', async (event, key) => {
+  // Handler for loading media thumbnail data (with local disk cache)
+  ipcMain.handle('storage:thumbnail', async (event, payload) => {
+    const meta = normalizeThumbnailMeta(payload);
+    const key = meta.key;
+
     try {
+      const cache = getThumbnailCache();
+
+      // 1. 命中本地缓存：直接返回，不再访问远端
+      if (cache) {
+        const cached = await cache.get(meta);
+        if (cached) {
+          return {
+            success: true,
+            data: {
+              type: 'image',
+              content: cached.buffer,
+              metadata: { contentType: cached.contentType, contentLength: cached.buffer.length },
+              key,
+              cached: true
+            }
+          };
+        }
+      }
+
       const activeStorageService = getStorageServiceOrThrow('preview');
       const previewData = await activeStorageService.previewFile(key);
       previewData.key = key;
@@ -1967,7 +2289,44 @@ function registerIPCHandlers() {
         throw error;
       }
 
-      return { success: true, data: previewData };
+      const content = previewData.content;
+      const sourceBytes = Buffer.isBuffer(content) ? content.length : 0;
+
+      // 2. 体积保护：过大的文件不为了一张缩略图去整包下载
+      if (sourceBytes > THUMBNAIL_MAX_SOURCE_BYTES) {
+        const error = new Error(`Thumbnail source too large: ${sourceBytes} bytes`);
+        error.code = 'THUMBNAIL_TOO_LARGE';
+        error.errorType = ErrorType.OBJECT;
+        error.userMessage = '文件过大，已跳过缩略图（请使用预览查看）';
+        throw error;
+      }
+
+      // 3. 图片：压缩成统一的小尺寸 JPEG 后落盘缓存，视频交给渲染进程抽帧后回写
+      if (previewData.type === 'image' && Buffer.isBuffer(content)) {
+        const encoded = encodeThumbnailImage(content, key);
+        const payload2 = encoded || { buffer: content, contentType: previewData.metadata?.contentType || 'image/jpeg' };
+
+        // 压缩后的缩略图通常只有几十 KB；编码失败回退原始内容时只在体积可控时才落盘
+        if (cache && payload2.buffer.length <= THUMBNAIL_RAW_CACHE_MAX_BYTES) {
+          await cache.put(meta, payload2.buffer, payload2.contentType);
+        }
+
+        return {
+          success: true,
+          data: {
+            type: 'image',
+            content: payload2.buffer,
+            metadata: {
+              contentType: payload2.contentType,
+              contentLength: payload2.buffer.length
+            },
+            key,
+            cached: false
+          }
+        };
+      }
+
+      return { success: true, data: { ...previewData, cached: false } };
     } catch (error) {
       ErrorLogger.logError(error, 'storage:thumbnail', { key });
 
@@ -1983,7 +2342,244 @@ function registerIPCHandlers() {
           fileSystemCode: error.fileSystemCode,
           isRetryable: ErrorHandler.isRetryable(error),
           shouldRefreshList: ErrorHandler.shouldRefreshList(error),
-          isAuthError: ErrorHandler.isAuthError(error)
+          isAuthError: ErrorHandler.isAuthError(error),
+          code: error.code
+        }
+      };
+    }
+  });
+
+  // Handler for reading a cached thumbnail without touching the network
+  ipcMain.handle('thumbnail:get', async (event, payload) => {
+    try {
+      const cache = getThumbnailCache();
+      if (!cache) {
+        return { success: true, data: null };
+      }
+
+      const cached = await cache.get(normalizeThumbnailMeta(payload));
+      if (!cached) {
+        return { success: true, data: null };
+      }
+
+      return {
+        success: true,
+        data: {
+          type: 'image',
+          content: cached.buffer,
+          metadata: { contentType: cached.contentType, contentLength: cached.buffer.length },
+          cached: true
+        }
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'thumbnail:get');
+      return { success: true, data: null };
+    }
+  });
+
+  // Handler for storing a renderer-generated thumbnail (e.g. video frame) into the disk cache
+  ipcMain.handle('thumbnail:put', async (event, payload) => {
+    try {
+      const cache = getThumbnailCache();
+      if (!cache) {
+        return { success: true, data: { stored: false } };
+      }
+
+      const content = payload?.content;
+      if (!content) {
+        return { success: true, data: { stored: false } };
+      }
+
+      const buffer = Buffer.isBuffer(content)
+        ? content
+        : Buffer.from(String(content), 'base64');
+
+      const stored = await cache.put(
+        normalizeThumbnailMeta(payload),
+        buffer,
+        payload?.contentType || 'image/jpeg'
+      );
+
+      return { success: true, data: { stored } };
+    } catch (error) {
+      ErrorLogger.logError(error, 'thumbnail:put');
+      return { success: true, data: { stored: false } };
+    }
+  });
+
+  // Handler for reading cache settings
+  ipcMain.handle('cache:getSettings', async (event) => {
+    try {
+      const settings = readThumbnailCacheSettings();
+      const listSettings = readObjectListCacheSettings();
+      return {
+        success: true,
+        data: {
+          enabled: settings.enabled,
+          maxSizeMB: settings.maxSizeMB,
+          listEnabled: listSettings.enabled
+        }
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'cache:getSettings');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: UI_TEXT.errorUnknown || '读取缓存设置失败'
+        }
+      };
+    }
+  });
+
+  // Handler for saving cache settings
+  ipcMain.handle('cache:saveSettings', async (event, payload) => {
+    try {
+      const saved = writeThumbnailCacheSettings(payload || {});
+      const cache = getThumbnailCache();
+      if (cache) {
+        cache.configure({
+          enabled: saved.enabled,
+          maxSizeBytes: saved.maxSizeMB * 1024 * 1024
+        });
+        await cache.evictToLimit();
+      }
+
+      // 列表缓存开关
+      let listEnabled = readObjectListCacheSettings().enabled;
+      if (typeof payload?.listEnabled === 'boolean') {
+        const Store = require('electron-store');
+        new Store({ name: 'settings' }).set('objectListCacheEnabled', payload.listEnabled);
+        listEnabled = payload.listEnabled;
+      }
+      const listCache = getObjectListCache();
+      if (listCache) {
+        listCache.configure({ enabled: listEnabled });
+        await listCache.evictToLimit();
+      }
+
+      const stats = cache ? await cache.getStats() : null;
+      const listStats = listCache ? await listCache.getStats() : null;
+
+      return {
+        success: true,
+        data: {
+          enabled: saved.enabled,
+          maxSizeMB: saved.maxSizeMB,
+          listEnabled,
+          usedBytes: stats?.usedBytes || 0,
+          count: stats?.count || 0,
+          directory: stats?.directory || '',
+          listCount: listStats?.count || 0,
+          listUsedBytes: listStats?.usedBytes || 0
+        }
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'cache:saveSettings');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: UI_TEXT.errorUnknown || '保存缓存设置失败'
+        }
+      };
+    }
+  });
+
+  // Handler for reading cache usage
+  ipcMain.handle('cache:stats', async (event) => {
+    try {
+      const settings = readThumbnailCacheSettings();
+      const cache = getThumbnailCache();
+      const stats = cache ? await cache.getStats() : null;
+
+      const listSettings = readObjectListCacheSettings();
+      const listCache = getObjectListCache();
+      const listStats = listCache ? await listCache.getStats() : null;
+
+      return {
+        success: true,
+        data: {
+          enabled: settings.enabled,
+          maxSizeMB: settings.maxSizeMB,
+          maxSizeBytes: stats?.maxSizeBytes || settings.maxSizeMB * 1024 * 1024,
+          usedBytes: stats?.usedBytes || 0,
+          count: stats?.count || 0,
+          directory: stats?.directory || '',
+          listEnabled: listSettings.enabled,
+          listCount: listStats?.count || 0,
+          listUsedBytes: listStats?.usedBytes || 0
+        }
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'cache:stats');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: UI_TEXT.errorUnknown || '读取缓存状态失败'
+        }
+      };
+    }
+  });
+
+  // Handler for clearing all caches (thumbnails + object lists)
+  ipcMain.handle('cache:clear', async (event) => {
+    try {
+      const cache = getThumbnailCache();
+      const listCache = getObjectListCache();
+
+      const result = cache
+        ? await cache.clear()
+        : { removed: 0, freedBytes: 0 };
+
+      let listRemoved = 0;
+      let listFreedBytes = 0;
+      if (listCache) {
+        const listResult = await listCache.clear();
+        listRemoved = listResult.removed;
+        listFreedBytes = listResult.freedBytes;
+      }
+
+      broadcastCacheCleared();
+
+      return {
+        success: true,
+        data: {
+          removed: result.removed,
+          freedBytes: result.freedBytes,
+          listRemoved,
+          listFreedBytes
+        }
+      };
+    } catch (error) {
+      ErrorLogger.logError(error, 'cache:clear');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: UI_TEXT.errorUnknown || '清理缓存失败'
+        }
+      };
+    }
+  });
+
+  // Handler for revealing the thumbnail cache directory
+  ipcMain.handle('cache:openLocation', async (event) => {
+    try {
+      const { shell } = require('electron');
+      // 打开缓存根目录（缩略图缓存与列表缓存都在其下）
+      getThumbnailCache();
+      getObjectListCache();
+      await shell.openPath(app.getPath('userData'));
+      return { success: true };
+    } catch (error) {
+      ErrorLogger.logError(error, 'cache:openLocation');
+      return {
+        success: false,
+        error: {
+          message: error.message,
+          userMessage: UI_TEXT.errorUnknown || '打开缓存目录失败'
         }
       };
     }

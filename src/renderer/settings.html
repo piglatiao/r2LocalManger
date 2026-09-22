@@ -481,6 +481,68 @@
       border-color: #2196f3;
       box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.2);
     }
+
+    /* Cache stats */
+    .cache-stats {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border: 1px solid #e5e5e5;
+      border-radius: 6px;
+      background-color: #fafafa;
+    }
+
+    .cache-stats-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 14px;
+      color: #555;
+      padding: 4px 0;
+    }
+
+    .cache-stats-row strong {
+      color: #333;
+      font-weight: 600;
+    }
+
+    .cache-directory-row {
+      align-items: flex-start;
+      margin-top: 10px;
+    }
+
+    .cache-directory {
+      flex: 1;
+      text-align: right;
+      font-size: 12px;
+      color: #888;
+      word-break: break-all;
+      line-height: 1.5;
+    }
+
+    .cache-progress {
+      margin-top: 10px;
+      height: 6px;
+      border-radius: 999px;
+      background-color: #e0e0e0;
+      overflow: hidden;
+    }
+
+    .cache-progress-bar {
+      height: 100%;
+      width: 0;
+      border-radius: 999px;
+      background-color: #2196f3;
+      transition: width 0.25s ease;
+    }
+
+    .cache-progress-bar.near-limit {
+      background-color: #ff9800;
+    }
+
+    .cache-progress-bar.over-limit {
+      background-color: #f44336;
+    }
   </style>
 </head>
 <body>
@@ -492,6 +554,9 @@
       </div>
       <div class="tab-nav-item" data-tab="bucket">
         <span data-i18n="settingsTabBucket">存储桶设置</span>
+      </div>
+      <div class="tab-nav-item" data-tab="cache">
+        <span data-i18n="settingsTabCache">缓存设置</span>
       </div>
     </nav>
     
@@ -733,6 +798,71 @@
             <button id="btn-update-custom-domain" class="btn btn-secondary" type="button">更新域名</button>
             <button id="btn-delete-custom-domain" class="btn btn-danger" type="button">解绑域名</button>
             <button id="btn-reset-custom-domain" class="btn btn-secondary" type="button">清空表单</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cache Tab -->
+      <div id="tab-cache" class="tab-panel">
+        <div class="settings-section">
+          <h2 class="settings-section-title" data-i18n="cacheTitle">缩略图缓存</h2>
+          <p class="settings-section-description" data-i18n="cacheDescription">缩略图与文件列表都会保存到本地磁盘，切换存储桶、切换目录时直接本地秒开；点击工具栏「刷新」才会重新同步远端。</p>
+
+          <div class="checkbox-group">
+            <input type="checkbox" id="thumbnail-cache-enabled" class="checkbox-input" checked>
+            <label for="thumbnail-cache-enabled" class="checkbox-label" data-i18n="cacheEnableLabel">启用本地缩略图缓存</label>
+          </div>
+
+          <div class="checkbox-group">
+            <input type="checkbox" id="object-list-cache-enabled" class="checkbox-input" checked>
+            <label for="object-list-cache-enabled" class="checkbox-label" data-i18n="cacheListEnableLabel">缓存文件列表（切换桶 / 目录直接本地秒开）</label>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="thumbnail-cache-limit" data-i18n="cacheLimitLabel">缓存大小上限</label>
+            <select id="thumbnail-cache-limit" class="form-select">
+              <option value="128">128 MB</option>
+              <option value="256">256 MB</option>
+              <option value="512">512 MB</option>
+              <option value="1024">1 GB</option>
+              <option value="2048">2 GB</option>
+              <option value="4096">4 GB</option>
+            </select>
+            <p class="help-text" data-i18n="cacheLimitHelp">超过上限时自动淘汰最久未使用的缩略图。</p>
+          </div>
+
+          <div class="cache-stats">
+            <div class="cache-stats-row">
+              <span data-i18n="cacheUsedLabel">当前占用</span>
+              <strong id="cache-used">-</strong>
+            </div>
+            <div class="cache-stats-row">
+              <span data-i18n="cacheCountLabel">缩略图条目</span>
+              <strong id="cache-count">-</strong>
+            </div>
+            <div class="cache-stats-row">
+              <span data-i18n="cacheListCountLabel">已缓存目录</span>
+              <strong id="cache-list-count">-</strong>
+            </div>
+            <div class="cache-progress">
+              <div id="cache-progress-bar" class="cache-progress-bar"></div>
+            </div>
+            <div class="cache-stats-row cache-directory-row">
+              <span data-i18n="cacheDirectoryLabel">缓存目录</span>
+              <span id="cache-directory" class="cache-directory">-</span>
+            </div>
+          </div>
+
+          <div class="btn-group">
+            <button id="btn-clear-cache" class="btn btn-danger" type="button">
+              <span data-i18n="cacheClearButton">清理缓存</span>
+            </button>
+            <button id="btn-open-cache-dir" class="btn btn-secondary" type="button">
+              <span data-i18n="cacheOpenDirectoryButton">打开缓存目录</span>
+            </button>
+            <button id="btn-refresh-cache-stats" class="btn btn-secondary" type="button">
+              <span data-i18n="cacheRefreshButton">刷新状态</span>
+            </button>
           </div>
         </div>
       </div>

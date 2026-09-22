@@ -330,6 +330,26 @@ var UI_TEXT = {
   securityClearConfirm: '确定要清除已保存的凭证吗？您需要重新输入凭证才能使用应用。',
   securityClearSuccess: '凭证已清除',
   securityClearFailed: '清除凭证失败',
+
+  // Settings tabs
+  settingsTabCredentials: '凭证配置',
+  settingsTabBucket: '存储桶设置',
+  settingsTabCache: '缓存设置',
+
+  // Thumbnail cache settings
+  cacheTitle: '缩略图缓存',
+  cacheDescription: '把列表与网格中的图片、视频首帧缩略图保存到本地磁盘，切换存储桶或重新进入目录时无需重复下载。',
+  cacheEnableLabel: '启用本地缩略图缓存',
+  cacheListEnableLabel: '缓存文件列表（切换桶 / 目录直接本地秒开）',
+  cacheLimitLabel: '缓存大小上限',
+  cacheLimitHelp: '超过上限时自动淘汰最久未使用的缩略图。',
+  cacheUsedLabel: '当前占用',
+  cacheCountLabel: '缩略图条目',
+  cacheListCountLabel: '已缓存目录',
+  cacheDirectoryLabel: '缓存目录',
+  cacheClearButton: '清理缓存',
+  cacheOpenDirectoryButton: '打开缓存目录',
+  cacheRefreshButton: '刷新状态',
 };
 
 // Export for use in both main and renderer processes
