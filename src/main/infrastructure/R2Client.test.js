@@ -117,16 +117,24 @@ describe('R2Client', () => {
     });
 
     test('should return virtual folders and direct objects for the requested prefix', async () => {
-      const lastModified = new Date('2024-01-03');
-      mockSend.mockResolvedValue({
-        CommonPrefixes: [{ Prefix: 'photos/raw/' }],
-        Contents: [{
-          Key: 'photos/readme.txt',
-          Size: 512,
-          LastModified: lastModified,
-          ContentType: 'text/plain'
-        }]
-      });
+      const directObjectLastModified = new Date('2024-01-03');
+      const folderLastModified = new Date('2024-01-05');
+      mockSend
+        .mockResolvedValueOnce({
+          CommonPrefixes: [{ Prefix: 'photos/raw/' }],
+          Contents: [{
+            Key: 'photos/readme.txt',
+            Size: 512,
+            LastModified: directObjectLastModified,
+            ContentType: 'text/plain'
+          }]
+        })
+        .mockResolvedValueOnce({
+          Contents: [{
+            Key: 'photos/raw/latest.jpg',
+            LastModified: folderLastModified
+          }]
+        });
 
       const result = await r2Client.listObjects('photos/');
 
@@ -141,16 +149,47 @@ describe('R2Client', () => {
           name: 'raw',
           isFolder: true,
           size: 0,
-          lastModified: null,
+          lastModified: folderLastModified,
           contentType: 'application/x-directory'
         },
         {
           key: 'photos/readme.txt',
           size: 512,
-          lastModified,
+          lastModified: directObjectLastModified,
           contentType: 'text/plain'
         }
       ]);
+    });
+
+    test('should paginate folder objects when finding latest modification time', async () => {
+      const latestModified = new Date('2024-01-06');
+      mockSend
+        .mockResolvedValueOnce({
+          CommonPrefixes: [{ Prefix: 'photos/raw/' }]
+        })
+        .mockResolvedValueOnce({
+          Contents: [{
+            Key: 'photos/raw/old.jpg',
+            LastModified: new Date('2024-01-04')
+          }],
+          IsTruncated: true,
+          NextContinuationToken: 'next-page'
+        })
+        .mockResolvedValueOnce({
+          Contents: [{
+            Key: 'photos/raw/new.jpg',
+            LastModified: latestModified
+          }]
+        });
+
+      const result = await r2Client.listObjects('photos/');
+
+      expect(result[0].lastModified).toBe(latestModified);
+      expect(ListObjectsV2Command).toHaveBeenNthCalledWith(3, {
+        Bucket: 'test-bucket',
+        Prefix: 'photos/raw/',
+        ContinuationToken: 'next-page'
+      });
     });
 
     test('should convert folder marker objects into folder entries', async () => {

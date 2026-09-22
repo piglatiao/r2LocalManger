@@ -137,6 +137,46 @@ class R2Client {
   }
 
   /**
+   * 查询虚拟文件夹下对象的最新修改时间。
+   * @param {string} folderPrefix - 文件夹对象前缀
+   * @returns {Promise<Date|string|null>} 最新修改时间
+   */
+  async getFolderLastModified(folderPrefix) {
+    let continuationToken;
+    let latestModified = null;
+
+    do {
+      const input = {
+        Bucket: this.bucket,
+        Prefix: folderPrefix
+      };
+      if (continuationToken) {
+        input.ContinuationToken = continuationToken;
+      }
+
+      const response = await this.s3Client.send(new ListObjectsV2Command(input));
+      (response.Contents || []).forEach(item => {
+        if (!item?.LastModified) {
+          return;
+        }
+
+        const currentTimestamp = new Date(item.LastModified).getTime();
+        const latestTimestamp = latestModified ? new Date(latestModified).getTime() : NaN;
+        if (Number.isFinite(currentTimestamp)
+          && (!Number.isFinite(latestTimestamp) || currentTimestamp > latestTimestamp)) {
+          latestModified = item.LastModified;
+        }
+      });
+
+      continuationToken = response.IsTruncated && response.NextContinuationToken
+        ? response.NextContinuationToken
+        : undefined;
+    } while (continuationToken);
+
+    return latestModified;
+  }
+
+  /**
    * 按当前目录层级列出对象和虚拟文件夹。
    * @param {string} prefix - 当前目录前缀，根目录为空字符串
    * @returns {Promise<Array<ObjectInfo>>} 当前目录下的文件和文件夹
@@ -164,7 +204,7 @@ class R2Client {
           name: folderKey.slice(normalizedPrefix.length).replace(/\/$/, ''),
           isFolder: true,
           size: 0,
-          lastModified: null,
+          lastModified: item.LastModified || null,
           contentType: 'application/x-directory'
         });
       });
@@ -193,6 +233,19 @@ class R2Client {
         lastModified: item.LastModified,
         contentType: item.ContentType
         }));
+
+      // CommonPrefixes 不带修改时间，使用文件夹内最新对象时间补齐展示信息。
+      for (const folder of folders.values()) {
+        if (folder.lastModified) {
+          continue;
+        }
+
+        try {
+          folder.lastModified = await this.getFolderLastModified(folder.key);
+        } catch {
+          folder.lastModified = null;
+        }
+      }
 
       return [...folders.values(), ...objects];
     } catch (error) {

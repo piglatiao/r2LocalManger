@@ -583,6 +583,9 @@ body {
 .grid-item {
   min-width: 0;
   position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   padding: 10px 8px 9px;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -611,7 +614,9 @@ body {
 }
 
 .grid-preview {
+  width: 100%;
   height: calc(var(--grid-item-width) * 0.72);
+  flex: 0 0 calc(var(--grid-item-width) * 0.72);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -626,25 +631,35 @@ body {
 
 .grid-preview .grid-folder-icon,
 .grid-preview .grid-file-icon {
+  width: calc(var(--grid-item-width) * 0.68);
+  height: calc(var(--grid-item-width) * 0.68);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: calc(var(--grid-item-width) * 0.34);
+  line-height: 1;
 }
 
 .grid-name {
+  width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #1f2937;
   font-size: 13px;
   line-height: 20px;
+  text-align: center;
 }
 
 .grid-meta {
+  width: 100%;
   min-height: 17px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #94a3b8;
   font-size: 11px;
+  text-align: center;
 }
 
 #object-list thead {
@@ -719,7 +734,7 @@ body {
 
 .col-size {
   width: 20%;
-  text-align: right;
+  text-align: left;
 }
 
 .col-modified {
