@@ -25,11 +25,6 @@ jest.mock('electron', () => ({
   }
 }));
 
-// Mock dotenv
-jest.mock('dotenv', () => ({
-  config: jest.fn()
-}));
-
 // Mock services
 jest.mock('./application/CredentialManager', () => ({
   CredentialManager: {}

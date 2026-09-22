@@ -58,7 +58,7 @@ var UI_TEXT = {
   // ==================== Error Messages ====================
   errorNetwork: '网络连接失败，请检查网络设置',
   errorAuth: '认证失败，请检查 API 凭证配置',
-  errorAuthDetail: '请先在“设置 > 凭证配置”中填写 R2 凭证，或正确设置环境变量 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY',
+  errorAuthDetail: '请先在“设置 > 凭证配置”中填写 R2 凭证，并在“存储桶设置”中确认连接参数',
   errorBucket: '存储桶不存在或无法访问',
   errorObject: '对象不存在，可能已被删除',
   errorPermission: '权限不足，无法执行此操作',

@@ -1,8 +1,7 @@
 /**
  * CredentialManager - Application Layer
- * 
- * Manages R2 API credentials by reading from environment variables
- * and validating them. Provides complete R2 configuration.
+ *
+ * 负责校验应用内设置页提供的 R2 凭证。
  */
 
 /**
@@ -10,15 +9,18 @@
  */
 class CredentialManager {
   /**
-   * Load credentials from environment variables
-   * @returns {Object} Credentials object
-   * @returns {string} credentials.accessKeyId - R2 Access Key ID
-   * @returns {string} credentials.secretAccessKey - R2 Secret Access Key
-   * @throws {Error} If credentials are missing
+   * 标准化设置页提供的凭证。
+   * @param {Object} credentials - 应用内设置中的凭证
+   * @returns {Object} 标准化后的凭证
+   * @throws {Error} 凭证缺失时抛出异常
    */
-  static loadCredentials() {
-    const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-    const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+  static loadCredentials(credentials = {}) {
+    const accessKeyId = typeof credentials.accessKeyId === 'string'
+      ? credentials.accessKeyId.trim()
+      : '';
+    const secretAccessKey = typeof credentials.secretAccessKey === 'string'
+      ? credentials.secretAccessKey.trim()
+      : '';
 
     if (!accessKeyId || !secretAccessKey) {
       const error = new Error('Missing R2 credentials');
@@ -63,31 +65,27 @@ class CredentialManager {
   }
 
   /**
-   * Get complete R2 configuration
-   * @returns {Object} R2Config object
-   * @returns {string} config.endpoint - R2 endpoint URL
-   * @returns {string} config.region - AWS region
-   * @returns {string} config.bucket - Bucket name
-   * @returns {string} config.accessKeyId - R2 Access Key ID
-   * @returns {string} config.secretAccessKey - R2 Secret Access Key
-   * @throws {Error} If credentials are missing or invalid
+   * 根据应用内凭证和设置组装 R2 配置。
+   * @param {Object} credentials - 应用内设置中的凭证
+   * @param {Object} settings - 应用内设置中的连接参数
+   * @returns {Object} R2 配置
+   * @throws {Error} 凭证缺失或无效时抛出异常
    */
-  static getConfig() {
-    const credentials = this.loadCredentials();
+  static getConfig(credentials, settings = {}) {
+    const normalizedCredentials = this.loadCredentials(credentials);
 
-    if (!this.validateCredentials(credentials)) {
+    if (!this.validateCredentials(normalizedCredentials)) {
       const error = new Error('Invalid R2 credentials');
       error.code = 'INVALID_CREDENTIALS';
       throw error;
     }
 
-    // Return complete R2 configuration with hardcoded values
     return {
-      endpoint: 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com',
-      region: 'auto',
-      bucket: 'picture',
-      accessKeyId: credentials.accessKeyId,
-      secretAccessKey: credentials.secretAccessKey
+      endpoint: String(settings.endpoint || '').trim(),
+      region: String(settings.region || 'auto').trim() || 'auto',
+      bucket: String(settings.bucket || '').trim(),
+      accessKeyId: normalizedCredentials.accessKeyId,
+      secretAccessKey: normalizedCredentials.secretAccessKey
     };
   }
 }

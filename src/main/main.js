@@ -1,6 +1,3 @@
-// 加载环境变量
-require('dotenv').config();
-
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
@@ -177,29 +174,15 @@ function storeSecretValue(store, key, value, encrypt = true) {
 }
 
 /**
- * Build Cloudflare API auth config from settings/env.
+ * 从本地设置构建 Cloudflare API 鉴权配置。
  * @param {Object} settings
  * @returns {{accountId: string, apiToken: string, jurisdiction: string}}
  */
 function resolveCloudflareApiConfig(settings = {}) {
-  const accountId =
-    String(
-      settings.cloudflareAccountId ||
-      process.env.CF_ACCOUNT_ID ||
-      process.env.CLOUDFLARE_ACCOUNT_ID ||
-      ''
-    ).trim() || inferAccountIdFromEndpoint(settings.endpoint || '');
-
-  const apiToken = String(
-    settings.cloudflareApiToken ||
-    process.env.CF_API_TOKEN ||
-    process.env.CLOUDFLARE_API_TOKEN ||
-    ''
-  ).trim();
-
-  const jurisdiction = normalizeJurisdiction(
-    settings.cloudflareJurisdiction || process.env.CF_R2_JURISDICTION
-  );
+  const accountId = String(settings.cloudflareAccountId || '').trim()
+    || inferAccountIdFromEndpoint(settings.endpoint || '');
+  const apiToken = String(settings.cloudflareApiToken || '').trim();
+  const jurisdiction = normalizeJurisdiction(settings.cloudflareJurisdiction);
 
   return { accountId, apiToken, jurisdiction };
 }
@@ -743,20 +726,17 @@ function getR2Settings() {
 
     const storedAccountId = settingsStore.get(
       'accountId',
-      settingsStore.get(
-        'cfAccountId',
-        process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID || DEFAULT_CF_ACCOUNT_ID
-      )
+      settingsStore.get('cfAccountId', DEFAULT_CF_ACCOUNT_ID)
     );
-    const endpointFallback = settingsStore.get('r2Endpoint', process.env.R2_ENDPOINT || DEFAULT_R2_ENDPOINT);
+    const endpointFallback = settingsStore.get('r2Endpoint', DEFAULT_R2_ENDPOINT);
     const endpoint = buildR2Endpoint(storedAccountId, endpointFallback);
 
-    const regionRaw = settingsStore.get('r2Region', process.env.R2_REGION || DEFAULT_R2_REGION);
-    const bucketRaw = settingsStore.get('currentBucket', process.env.R2_BUCKET || DEFAULT_R2_BUCKET);
-    const publicUrlRaw = settingsStore.get('r2PublicUrl', process.env.R2_PUBLIC_URL || DEFAULT_R2_PUBLIC_URL);
+    const regionRaw = settingsStore.get('r2Region', DEFAULT_R2_REGION);
+    const bucketRaw = settingsStore.get('currentBucket', DEFAULT_R2_BUCKET);
+    const publicUrlRaw = settingsStore.get('r2PublicUrl', DEFAULT_R2_PUBLIC_URL);
     const cfJurisdictionRaw = settingsStore.get(
       'cfR2Jurisdiction',
-      settingsStore.get('jurisdiction', process.env.CF_R2_JURISDICTION || DEFAULT_CF_R2_JURISDICTION)
+      settingsStore.get('jurisdiction', DEFAULT_CF_R2_JURISDICTION)
     );
 
     let publicUrl;
@@ -777,12 +757,7 @@ function getR2Settings() {
     }
 
     if (!cloudflareApiToken) {
-      cloudflareApiToken = String(
-        settingsStore.get(
-          'cfApiToken',
-          process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || DEFAULT_CF_API_TOKEN
-        ) || ''
-      ).trim();
+      cloudflareApiToken = String(settingsStore.get('cfApiToken', '') || '').trim();
     }
 
     const region = String(regionRaw || DEFAULT_R2_REGION).trim() || DEFAULT_R2_REGION;
@@ -911,14 +886,14 @@ function loadStoredCredentials() {
         'accountId',
         settingsStore.get(
           'cfAccountId',
-          process.env.CF_ACCOUNT_ID || process.env.CLOUDFLARE_ACCOUNT_ID || DEFAULT_CF_ACCOUNT_ID
+          DEFAULT_CF_ACCOUNT_ID
         )
       ) || ''
     ).trim();
     const jurisdiction = normalizeJurisdiction(
       settingsStore.get(
         'jurisdiction',
-        settingsStore.get('cfR2Jurisdiction', process.env.CF_R2_JURISDICTION || DEFAULT_CF_R2_JURISDICTION)
+        settingsStore.get('cfR2Jurisdiction', DEFAULT_CF_R2_JURISDICTION)
       )
     );
 
@@ -941,31 +916,11 @@ function loadStoredCredentials() {
 }
 
 /**
- * 解析当前可用凭证（优先本地保存，其次环境变量）。
+ * 解析当前可用凭证。
  * @returns {Object|null} 凭证对象或 null
  */
 function resolveCredentials() {
-  const storedCredentials = loadStoredCredentials();
-  if (storedCredentials) {
-    return storedCredentials;
-  }
-
-  try {
-    const envCredentials = CredentialManager.loadCredentials();
-    if (!CredentialManager.validateCredentials(envCredentials)) {
-      return null;
-    }
-
-    const r2Settings = getR2Settings();
-    return {
-      ...envCredentials,
-      apiToken: String(r2Settings.cloudflareApiToken || '').trim(),
-      accountId: String(r2Settings.cloudflareAccountId || '').trim(),
-      jurisdiction: normalizeJurisdiction(r2Settings.cloudflareJurisdiction)
-    };
-  } catch {
-    return null;
-  }
+  return loadStoredCredentials();
 }
 
 /**
@@ -1101,7 +1056,7 @@ async function promptStartupCheckFailure(startupCheckResult) {
   let detail = UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。';
 
   if (startupCheckResult.status === StartupCheckStatus.MISSING_CREDENTIALS) {
-    detail = UI_TEXT.errorAuthDetail || '请先在“设置 > 凭证配置”中填写 R2 凭证，或正确设置环境变量 R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY';
+    detail = UI_TEXT.errorAuthDetail || '请先在“设置 > 凭证配置”中填写 R2 凭证，并在“存储桶设置”中确认连接参数';
   } else if (startupCheckResult.status === StartupCheckStatus.INVALID_SETTINGS) {
     detail = startupCheckResult.error?.message || (UI_TEXT.startupCheckDetail || '可点击“检查配置”打开设置页面。');
   } else if (startupCheckResult.status === StartupCheckStatus.CONNECTION_FAILED) {

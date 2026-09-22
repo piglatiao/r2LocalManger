@@ -251,7 +251,7 @@ const FILE_TYPE_ICONS = {
 const IMAGE_FILE_TYPES = new Set(FILE_TYPE_ICONS.image.types);
 const VIDEO_FILE_TYPES = new Set(FILE_TYPE_ICONS.video.types);
 const PREVIEWABLE_FILE_TYPES = new Set(['image', 'video', 'pdf']);
-const GRID_ZOOM_LEVELS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+const GRID_ZOOM_LEVELS = [0.75, 1, 1.5];
 const LARGE_UPLOAD_THRESHOLD_BYTES = 300 * 1024 * 1024;
 const thumbnailObjectUrls = new Map();
 const thumbnailRequests = new Map();
@@ -632,7 +632,7 @@ function updateViewModeControls() {
 }
 
 /**
- * 在网格视图中使用 Ctrl+滚轮调整图标预览尺寸。
+ * 按列表、小图标、中图标、大图标的顺序切换视图。
  * @param {WheelEvent} event - 滚轮事件
  */
 function handleViewZoom(event) {
@@ -641,20 +641,30 @@ function handleViewZoom(event) {
   }
 
   event.preventDefault();
+  const direction = event.deltaY < 0 ? 1 : -1;
+
+  if (state.viewMode !== 'grid') {
+    if (direction > 0) {
+      state.viewMode = 'grid';
+      state.gridScale = GRID_ZOOM_LEVELS[0];
+      updateViewModeControls();
+    }
+    return;
+  }
+
   const currentIndex = GRID_ZOOM_LEVELS.indexOf(state.gridScale);
   const safeIndex = currentIndex === -1 ? 1 : currentIndex;
-  const direction = event.deltaY < 0 ? 1 : -1;
+
+  if (direction < 0 && safeIndex === 0) {
+    state.viewMode = 'list';
+    updateViewModeControls();
+    return;
+  }
+
   const nextIndex = Math.max(0, Math.min(
     GRID_ZOOM_LEVELS.length - 1,
     safeIndex + direction
   ));
-
-  if (state.viewMode !== 'grid') {
-    state.viewMode = 'grid';
-    state.gridScale = GRID_ZOOM_LEVELS[nextIndex];
-    updateViewModeControls();
-    return;
-  }
 
   if (nextIndex !== safeIndex) {
     state.gridScale = GRID_ZOOM_LEVELS[nextIndex];

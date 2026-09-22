@@ -1,29 +1,16 @@
 /**
- * Unit tests for CredentialManager
+ * CredentialManager 单元测试
  */
 
 const { CredentialManager } = require('./CredentialManager');
 
 describe('CredentialManager', () => {
-  // Store original environment variables
-  const originalEnv = process.env;
-
-  beforeEach(() => {
-    // Reset environment before each test
-    process.env = { ...originalEnv };
-  });
-
-  afterAll(() => {
-    // Restore original environment
-    process.env = originalEnv;
-  });
-
   describe('loadCredentials', () => {
-    test('should load credentials from environment variables', () => {
-      process.env.R2_ACCESS_KEY_ID = 'test_access_key';
-      process.env.R2_SECRET_ACCESS_KEY = 'test_secret_key';
-
-      const credentials = CredentialManager.loadCredentials();
+    test('should load credentials from local settings', () => {
+      const credentials = CredentialManager.loadCredentials({
+        accessKeyId: 'test_access_key',
+        secretAccessKey: 'test_secret_key'
+      });
 
       expect(credentials).toEqual({
         accessKeyId: 'test_access_key',
@@ -32,27 +19,27 @@ describe('CredentialManager', () => {
     });
 
     test('should throw error when access key is missing', () => {
-      delete process.env.R2_ACCESS_KEY_ID;
-      process.env.R2_SECRET_ACCESS_KEY = 'test_secret_key';
-
       expect(() => {
-        CredentialManager.loadCredentials();
+        CredentialManager.loadCredentials({ secretAccessKey: 'test_secret_key' });
       }).toThrow('Missing R2 credentials');
     });
 
     test('should throw error when secret key is missing', () => {
-      process.env.R2_ACCESS_KEY_ID = 'test_access_key';
-      delete process.env.R2_SECRET_ACCESS_KEY;
-
       expect(() => {
-        CredentialManager.loadCredentials();
+        CredentialManager.loadCredentials({ accessKeyId: 'test_access_key' });
+      }).toThrow('Missing R2 credentials');
+    });
+
+    test('should reject non-string credentials', () => {
+      expect(() => {
+        CredentialManager.loadCredentials({
+          accessKeyId: 123,
+          secretAccessKey: 'test_secret_key'
+        });
       }).toThrow('Missing R2 credentials');
     });
 
     test('should throw error with details when credentials are missing', () => {
-      delete process.env.R2_ACCESS_KEY_ID;
-      delete process.env.R2_SECRET_ACCESS_KEY;
-
       try {
         CredentialManager.loadCredentials();
         fail('Should have thrown an error');
@@ -156,14 +143,21 @@ describe('CredentialManager', () => {
   });
 
   describe('getConfig', () => {
-    test('should return complete R2 configuration', () => {
-      process.env.R2_ACCESS_KEY_ID = 'test_access_key';
-      process.env.R2_SECRET_ACCESS_KEY = 'test_secret_key';
-
-      const config = CredentialManager.getConfig();
+    test('should return complete R2 configuration from local settings', () => {
+      const config = CredentialManager.getConfig(
+        {
+          accessKeyId: 'test_access_key',
+          secretAccessKey: 'test_secret_key'
+        },
+        {
+          endpoint: 'https://example.r2.cloudflarestorage.com',
+          region: 'auto',
+          bucket: 'picture'
+        }
+      );
 
       expect(config).toEqual({
-        endpoint: 'https://12b1178bf0856d6e0b7d787ebd43cee5.r2.cloudflarestorage.com',
+        endpoint: 'https://example.r2.cloudflarestorage.com',
         region: 'auto',
         bucket: 'picture',
         accessKeyId: 'test_access_key',
@@ -172,20 +166,20 @@ describe('CredentialManager', () => {
     });
 
     test('should throw error when credentials are missing', () => {
-      delete process.env.R2_ACCESS_KEY_ID;
-      delete process.env.R2_SECRET_ACCESS_KEY;
-
       expect(() => {
-        CredentialManager.getConfig();
+        CredentialManager.getConfig(undefined, {
+          endpoint: 'https://example.r2.cloudflarestorage.com',
+          bucket: 'picture'
+        });
       }).toThrow('Missing R2 credentials');
     });
 
     test('should throw error when credentials are invalid', () => {
-      process.env.R2_ACCESS_KEY_ID = '';
-      process.env.R2_SECRET_ACCESS_KEY = 'test_secret_key';
-
       expect(() => {
-        CredentialManager.getConfig();
+        CredentialManager.getConfig({
+          accessKeyId: '',
+          secretAccessKey: 'test_secret_key'
+        });
       }).toThrow();
     });
   });

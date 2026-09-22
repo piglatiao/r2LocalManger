@@ -567,7 +567,7 @@ class R2Client {
    */
   async getObjectUrl(key) {
     try {
-      // 始终优先使用当前桶同步回来的 publicUrl，避免切桶后沿用旧的全局环境变量。
+      // 始终优先使用当前桶同步回来的 publicUrl，避免切桶后沿用旧的全局配置。
       const publicUrl = String(this.config.publicUrl || this.config.endpoint || '').trim().replace(/\/+$/, '');
       // 直接拼接当前对象访问地址，确保每个桶返回自己的公开域名。
       const url = `${publicUrl}/${key}`;
