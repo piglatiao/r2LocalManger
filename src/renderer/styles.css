@@ -275,6 +275,17 @@ body {
   flex: 0 0 auto;
 }
 
+.page-size-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.page-size-select {
+  min-width: 72px;
+}
+
 .view-mode-btn,
 .folder-nav-btn,
 .folder-breadcrumb-btn {
@@ -398,7 +409,9 @@ body {
 /* ==================== 主内容区域 ==================== */
 #content {
   flex: 1;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background-color: #fff;
   position: relative;
 }
@@ -549,9 +562,56 @@ body {
 
 /* ==================== 对象列表表格 ==================== */
 #object-list-container {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   position: relative;
+}
+
+.pagination {
+  min-height: 44px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border-top: 1px solid #e5e7eb;
+  background-color: #f8f8f8;
+  color: #666;
+  font-size: 12px;
+}
+
+.pagination-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pagination-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #d6dbe1;
+  border-radius: 4px;
+  background-color: #fff;
+  color: #334155;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.pagination-btn:hover:not(:disabled),
+.pagination-btn:focus-visible:not(:disabled) {
+  border-color: #3498db;
+  background-color: #eef5fb;
+  outline: none;
+}
+
+.pagination-btn:disabled {
+  color: #b6bdc6;
+  background-color: #f1f3f5;
+  cursor: not-allowed;
 }
 
 #object-list {

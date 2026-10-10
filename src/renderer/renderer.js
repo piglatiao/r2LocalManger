@@ -209,6 +209,7 @@ const elements = {
   btnPreview: document.getElementById('btn-preview'),
   btnDelete: document.getElementById('btn-delete'),
   btnRefresh: document.getElementById('btn-refresh'),
+  btnSelectAll: document.getElementById('btn-select-all'),
   btnFolderUp: document.getElementById('btn-folder-up'),
   folderBreadcrumbs: document.getElementById('folder-breadcrumbs'),
   btnViewList: document.getElementById('btn-view-list'),
@@ -221,10 +222,15 @@ const elements = {
   filterDateStart: document.getElementById('filter-date-start'),
   filterDateEnd: document.getElementById('filter-date-end'),
   btnClearDate: document.getElementById('btn-clear-date'),
+  pageSize: document.getElementById('page-size'),
   objectList: document.getElementById('object-list'),
   objectListBody: document.getElementById('object-list-body'),
   objectGrid: document.getElementById('object-grid'),
   objectListContainer: document.getElementById('object-list-container'),
+  pagination: document.getElementById('pagination'),
+  paginationInfo: document.getElementById('pagination-info'),
+  btnPreviousPage: document.getElementById('btn-previous-page'),
+  btnNextPage: document.getElementById('btn-next-page'),
   settingsEmbeddedContainer: document.getElementById('settings-embedded-container'),
   settingsEmbeddedFrame: document.getElementById('settings-embedded-frame'),
   statusText: document.getElementById('status-text'),
@@ -256,6 +262,8 @@ const state = {
   buckets: [],
   currentBucket: '',
   currentSort: { column: 'name', direction: 'asc' },
+  currentPage: 1,
+  pageSize: 20,
   currentPrefix: '', // 当前目录前缀
   viewMode: 'list', // 当前排列方式
   gridScale: 1, // 网格图标缩放比例
@@ -356,6 +364,9 @@ function init() {
   elements.btnPreview.addEventListener('click', handlePreview);
   elements.btnDelete.addEventListener('click', handleDelete);
   elements.btnRefresh.addEventListener('click', handleRefresh);
+  if (elements.btnSelectAll) {
+    elements.btnSelectAll.addEventListener('click', handleSelectAllButton);
+  }
   if (elements.bucketSwitch) {
     elements.bucketSwitch.addEventListener('change', handleBucketSwitchChange);
   }
@@ -385,6 +396,9 @@ function init() {
   if (elements.btnClearDate) {
     elements.btnClearDate.addEventListener('click', handleClearDateFilter);
   }
+  if (elements.pageSize) {
+    elements.pageSize.addEventListener('change', handlePageSizeChange);
+  }
 
   // 绑定目录导航和视图切换事件
   if (elements.btnFolderUp) {
@@ -408,6 +422,12 @@ function init() {
       header.addEventListener('keydown', handleSortHeaderKeydown);
     });
     updateSortIndicators();
+  }
+  if (elements.btnPreviousPage) {
+    elements.btnPreviousPage.addEventListener('click', () => changePage(-1));
+  }
+  if (elements.btnNextPage) {
+    elements.btnNextPage.addEventListener('click', () => changePage(1));
   }
   
   // 绑定键盘快捷键
@@ -490,6 +510,9 @@ function setTooltips() {
   elements.btnPreview.title = UI_TEXT.tooltipPreview || '预览选中文件 (Enter)';
   elements.btnDelete.title = UI_TEXT.tooltipDelete || '删除选中文件 (Delete)';
   elements.btnRefresh.title = UI_TEXT.tooltipRefresh || '刷新列表 (Ctrl+R)';
+  if (elements.btnSelectAll) {
+    elements.btnSelectAll.title = UI_TEXT.tooltipSelectAll || '全选 (Ctrl+A)';
+  }
   if (elements.searchInput) {
     elements.searchInput.title = UI_TEXT.tooltipSearch || '搜索文件 (Esc 清除)';
   }
@@ -515,6 +538,17 @@ function setTooltips() {
   if (elements.btnViewGrid) {
     elements.btnViewGrid.title = UI_TEXT.viewGrid || '网格视图';
     elements.btnViewGrid.setAttribute('aria-label', UI_TEXT.viewGrid || '网格视图');
+  }
+  if (elements.pageSize) {
+    elements.pageSize.title = UI_TEXT.pageSizeLabel || '每页显示数量';
+  }
+  if (elements.btnPreviousPage) {
+    elements.btnPreviousPage.title = UI_TEXT.paginationPrevious || '上一页';
+    elements.btnPreviousPage.setAttribute('aria-label', UI_TEXT.paginationPrevious || '上一页');
+  }
+  if (elements.btnNextPage) {
+    elements.btnNextPage.title = UI_TEXT.paginationNext || '下一页';
+    elements.btnNextPage.setAttribute('aria-label', UI_TEXT.paginationNext || '下一页');
   }
 }
 
@@ -1205,6 +1239,7 @@ async function loadObjectList(options = {}) {
 
   // 清除选择状态
   clearSelection();
+  state.currentPage = 1;
   
   // 清除搜索状态
   state.searchTerm = '';
@@ -1341,11 +1376,14 @@ function renderObjectList() {
   updateSortIndicators();
 
   const hasFilters = hasActiveFilters();
+  const allObjectsToRender = getSortedObjectsToRender();
   const objectsToRender = getObjectsToRender();
+  updatePagination(allObjectsToRender.length);
   
   // 如果有筛选条件但没有匹配结果，显示无结果提示
   if (hasFilters && objectsToRender.length === 0) {
     showNoResultsMessage(state.searchTerm, state.filterType, state.filterDateStart, state.filterDateEnd);
+    updateSelectionCount();
     return;
   }
 
@@ -1430,6 +1468,16 @@ function hasActiveFilters() {
  * @returns {Array<Object>} 当前目录中的可见对象
  */
 function getObjectsToRender() {
+  const objects = getSortedObjectsToRender();
+  const startIndex = (state.currentPage - 1) * state.pageSize;
+  return objects.slice(startIndex, startIndex + state.pageSize);
+}
+
+/**
+ * 获取当前筛选和排序后的全部对象。
+ * @returns {Array<Object>} 当前筛选结果
+ */
+function getSortedObjectsToRender() {
   const objects = hasActiveFilters() ? state.filteredObjects : state.objects;
   return objects
     .map((object, index) => ({ object, index }))
@@ -1438,6 +1486,69 @@ function getObjectsToRender() {
       return result || left.index - right.index;
     })
     .map(({ object }) => object);
+}
+
+/**
+ * 更新分页信息和翻页按钮状态。
+ * @param {number} totalCount - 当前筛选结果总数
+ */
+function updatePagination(totalCount) {
+  if (!elements.pagination || !elements.paginationInfo) {
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / state.pageSize));
+  state.currentPage = Math.min(Math.max(state.currentPage, 1), totalPages);
+
+  if (totalCount <= state.pageSize) {
+    elements.pagination.style.display = 'none';
+    return;
+  }
+
+  const template = UI_TEXT.paginationPageInfo || '第 {current} / {total} 页';
+  elements.paginationInfo.textContent = template
+    .replace('{current}', state.currentPage)
+    .replace('{total}', totalPages);
+  elements.pagination.style.display = 'flex';
+  elements.btnPreviousPage.disabled = state.currentPage <= 1;
+  elements.btnNextPage.disabled = state.currentPage >= totalPages;
+}
+
+/**
+ * 处理每页数量变更。
+ * @param {Event} event - 下拉框变更事件
+ */
+function handlePageSizeChange(event) {
+  const pageSize = Number(event.target.value);
+  if (![20, 50, 100].includes(pageSize)) {
+    event.target.value = String(state.pageSize);
+    return;
+  }
+
+  state.pageSize = pageSize;
+  state.currentPage = 1;
+  lastClickedIndex = -1;
+  renderObjectList();
+  updateButtonStates();
+  updateSelectionCount();
+}
+
+/**
+ * 切换当前页。
+ * @param {number} offset - 页码变化量
+ */
+function changePage(offset) {
+  const totalCount = getSortedObjectsToRender().length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / state.pageSize));
+  const nextPage = state.currentPage + offset;
+
+  if (nextPage < 1 || nextPage > totalPages || nextPage === state.currentPage) {
+    return;
+  }
+
+  state.currentPage = nextPage;
+  lastClickedIndex = -1;
+  renderObjectList();
 }
 
 /**
@@ -1659,6 +1770,7 @@ function getFilterTypeLabel(filterType) {
 function handleSearchInput(event) {
   const searchTerm = event.target.value.trim();
   state.searchTerm = searchTerm;
+  state.currentPage = 1;
   
   // 显示/隐藏清除按钮
   elements.btnClearSearch.style.display = searchTerm ? 'block' : 'none';
@@ -1684,6 +1796,7 @@ function handleSearchInput(event) {
  */
 function handleClearSearch() {
   state.searchTerm = '';
+  state.currentPage = 1;
   elements.searchInput.value = '';
   elements.btnClearSearch.style.display = 'none';
   
@@ -1709,6 +1822,7 @@ function handleClearSearch() {
  */
 function handleFilterTypeChange(event) {
   state.filterType = event.target.value;
+  state.currentPage = 1;
   
   // 重新应用筛选
   applyFilters();
@@ -1748,6 +1862,7 @@ function handleDateFilterChange(event) {
   
   state.filterDateStart = startDate || null;
   state.filterDateEnd = endDate || null;
+  state.currentPage = 1;
   
   // 显示/隐藏清除按钮
   const hasDateFilter = state.filterDateStart || state.filterDateEnd;
@@ -1775,6 +1890,7 @@ function handleDateFilterChange(event) {
 function handleClearDateFilter() {
   state.filterDateStart = null;
   state.filterDateEnd = null;
+  state.currentPage = 1;
   elements.filterDateStart.value = '';
   elements.filterDateEnd.value = '';
   elements.btnClearDate.style.display = 'none';
@@ -2596,8 +2712,8 @@ function findRenderedObjectElement(objectKey) {
  * 全选
  */
 function selectAll() {
-  // 选择当前显示的对象（过滤后的或全部）
-  const objectsToSelect = getObjectsToRender();
+  // 选择当前筛选结果的全部对象，包括未显示在当前页的对象。
+  const objectsToSelect = getSortedObjectsToRender();
   
   objectsToSelect.forEach((obj, index) => {
     state.selectedObjects.add(obj.key);
@@ -2606,6 +2722,51 @@ function selectAll() {
   
   updateButtonStates();
   updateSelectionCount();
+}
+
+/**
+ * 处理工具栏全选按钮，已全选时清除全部选择。
+ */
+function handleSelectAllButton() {
+  const objectsToSelect = getSortedObjectsToRender();
+  if (objectsToSelect.length === 0) {
+    return;
+  }
+
+  if (objectsToSelect.every(object => state.selectedObjects.has(object.key))) {
+    clearSelection();
+  } else {
+    selectAll();
+    return;
+  }
+
+  updateButtonStates();
+  updateSelectionCount();
+}
+
+/**
+ * 更新全选按钮的文本、状态和可用性。
+ */
+function updateSelectAllButton() {
+  if (!elements.btnSelectAll) {
+    return;
+  }
+
+  const objects = getSortedObjectsToRender();
+  const allSelected = objects.length > 0
+    && objects.every(object => state.selectedObjects.has(object.key));
+  const buttonText = elements.btnSelectAll.querySelector('.btn-text');
+
+  elements.btnSelectAll.disabled = objects.length === 0;
+  elements.btnSelectAll.setAttribute('aria-pressed', String(allSelected));
+  elements.btnSelectAll.title = allSelected
+    ? (UI_TEXT.clearSelectionButton || '取消全选')
+    : (UI_TEXT.tooltipSelectAll || '全选 (Ctrl+A)');
+  if (buttonText) {
+    buttonText.textContent = allSelected
+      ? (UI_TEXT.clearSelectionButton || '取消全选')
+      : (UI_TEXT.selectAllButton || '全选');
+  }
 }
 
 /**
@@ -2619,6 +2780,7 @@ function updateButtonStates() {
   elements.btnDownload.disabled = !hasOnlyFiles;
   elements.btnPreview.disabled = !selectedObject || !isPreviewableFile(selectedObject.key);
   elements.btnDelete.disabled = !hasOnlyFiles;
+  updateSelectAllButton();
 }
 
 /**
@@ -2642,6 +2804,8 @@ function updateSelectionCount() {
       updateObjectCount(totalCount);
     }
   }
+
+  updateSelectAllButton();
 }
 
 /**

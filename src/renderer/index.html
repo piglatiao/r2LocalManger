@@ -31,6 +31,10 @@
         <span class="btn-icon">🔄</span>
         <span class="btn-text" data-i18n="refreshButton">刷新</span>
       </button>
+      <button id="btn-select-all" class="toolbar-btn" type="button" aria-pressed="false" disabled>
+        <span class="btn-icon">☑️</span>
+        <span class="btn-text" data-i18n="selectAllButton">全选</span>
+      </button>
       <div class="toolbar-separator"></div>
       <div class="bucket-switch-container">
         <label for="bucket-switch" class="filter-label" data-i18n="labelBucket">存储桶:</label>
@@ -75,6 +79,14 @@
       <div class="view-mode-container" role="group" aria-label="视图方式">
         <button id="btn-view-list" class="view-mode-btn active" type="button" aria-label="列表视图" aria-pressed="true" title="列表视图">☷</button>
         <button id="btn-view-grid" class="view-mode-btn" type="button" aria-label="网格视图" aria-pressed="false" title="网格视图">▦</button>
+      </div>
+      <div class="page-size-container">
+        <label for="page-size" class="filter-label" data-i18n="pageSizeLabel">每页:</label>
+        <select id="page-size" class="filter-select page-size-select">
+          <option value="20">20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
       </div>
       </div>
     </header>
@@ -131,6 +143,14 @@
         <div id="empty-state" style="display: none;">
           <p>暂无对象</p>
           <p class="hint">点击"上传"按钮添加文件</p>
+        </div>
+      </div>
+
+      <div id="pagination" class="pagination" style="display: none;" aria-label="分页导航">
+        <span id="pagination-info" aria-live="polite"></span>
+        <div class="pagination-actions">
+          <button id="btn-previous-page" class="pagination-btn" type="button" aria-label="上一页" title="上一页">‹</button>
+          <button id="btn-next-page" class="pagination-btn" type="button" aria-label="下一页" title="下一页">›</button>
         </div>
       </div>
 

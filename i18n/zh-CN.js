@@ -17,6 +17,8 @@ var UI_TEXT = {
   previewButton: '预览',
   deleteButton: '删除',
   refreshButton: '刷新',
+  selectAllButton: '全选',
+  clearSelectionButton: '取消全选',
   
   // ==================== Table Column Headers ====================
   columnIcon: '预览',
@@ -39,6 +41,10 @@ var UI_TEXT = {
   statusUploading: '正在上传...',
   statusDownloading: '正在下载...',
   objectCount: '共 {count} 个对象',
+  pageSizeLabel: '每页:',
+  paginationPageInfo: '第 {current} / {total} 页',
+  paginationPrevious: '上一页',
+  paginationNext: '下一页',
   
   // ==================== Dialog Titles and Messages ====================
   dialogSelectFile: '选择要上传的文件',
