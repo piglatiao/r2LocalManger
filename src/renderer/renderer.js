@@ -2712,8 +2712,8 @@ function findRenderedObjectElement(objectKey) {
  * 全选
  */
 function selectAll() {
-  // 选择当前筛选结果的全部对象，包括未显示在当前页的对象。
-  const objectsToSelect = getSortedObjectsToRender();
+  // 只选择当前页对象，其他分页不参与本次全选。
+  const objectsToSelect = getObjectsToRender();
   
   objectsToSelect.forEach((obj, index) => {
     state.selectedObjects.add(obj.key);
@@ -2728,13 +2728,16 @@ function selectAll() {
  * 处理工具栏全选按钮，已全选时清除全部选择。
  */
 function handleSelectAllButton() {
-  const objectsToSelect = getSortedObjectsToRender();
+  const objectsToSelect = getObjectsToRender();
   if (objectsToSelect.length === 0) {
     return;
   }
 
   if (objectsToSelect.every(object => state.selectedObjects.has(object.key))) {
-    clearSelection();
+    objectsToSelect.forEach((object) => {
+      state.selectedObjects.delete(object.key);
+      updateRenderedObjectSelection(object.key, false);
+    });
   } else {
     selectAll();
     return;
@@ -2752,7 +2755,7 @@ function updateSelectAllButton() {
     return;
   }
 
-  const objects = getSortedObjectsToRender();
+  const objects = getObjectsToRender();
   const allSelected = objects.length > 0
     && objects.every(object => state.selectedObjects.has(object.key));
   const buttonText = elements.btnSelectAll.querySelector('.btn-text');
