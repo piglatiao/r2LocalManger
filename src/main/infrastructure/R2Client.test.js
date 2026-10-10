@@ -40,7 +40,10 @@ jest.mock('fs', () => ({
   existsSync: jest.fn(),
   statSync: jest.fn(),
   createReadStream: jest.fn(),
-  createWriteStream: jest.fn()
+  createWriteStream: jest.fn(),
+  promises: {
+    mkdir: jest.fn()
+  }
 }));
 
 describe('R2Client', () => {
@@ -506,6 +509,7 @@ describe('R2Client', () => {
       await r2Client.downloadObject('test-key', '/path/to/save.jpg');
 
       expect(mockSend).toHaveBeenCalled();
+      expect(fs.promises.mkdir).toHaveBeenCalledWith('/path/to', { recursive: true });
       expect(mockWriteStream.write).toHaveBeenCalled();
       expect(mockWriteStream.end).toHaveBeenCalled();
     });

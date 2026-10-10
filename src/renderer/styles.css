@@ -677,6 +677,33 @@ body {
   white-space: nowrap;
 }
 
+#object-list th[data-sort-column] {
+  cursor: pointer;
+  user-select: none;
+}
+
+#object-list th[data-sort-column]:hover,
+#object-list th[data-sort-column]:focus-visible {
+  background-color: #eef5fb;
+  outline: none;
+}
+
+#object-list th[data-sort-column]::after {
+  content: ' \2195';
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+#object-list th[data-sort-column][data-sort-direction="asc"]::after {
+  content: ' \2191';
+  color: #1976d2;
+}
+
+#object-list th[data-sort-column][data-sort-direction="desc"]::after {
+  content: ' \2193';
+  color: #1976d2;
+}
+
 #object-list td {
   padding: 10px;
   border-bottom: 1px solid #eee;

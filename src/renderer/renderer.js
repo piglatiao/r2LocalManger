@@ -221,6 +221,7 @@ const elements = {
   filterDateStart: document.getElementById('filter-date-start'),
   filterDateEnd: document.getElementById('filter-date-end'),
   btnClearDate: document.getElementById('btn-clear-date'),
+  objectList: document.getElementById('object-list'),
   objectListBody: document.getElementById('object-list-body'),
   objectGrid: document.getElementById('object-grid'),
   objectListContainer: document.getElementById('object-list-container'),
@@ -400,6 +401,13 @@ function init() {
   }
   if (elements.objectListContainer) {
     elements.objectListContainer.addEventListener('wheel', handleViewZoom, { passive: false });
+  }
+  if (elements.objectList) {
+    elements.objectList.querySelectorAll('th[data-sort-column]').forEach((header) => {
+      header.addEventListener('click', handleSortHeaderClick);
+      header.addEventListener('keydown', handleSortHeaderKeydown);
+    });
+    updateSortIndicators();
   }
   
   // 绑定键盘快捷键
@@ -1330,6 +1338,7 @@ function renderObjectList() {
   }
   elements.objectListBody.innerHTML = '';
   elements.objectGrid.innerHTML = '';
+  updateSortIndicators();
 
   const hasFilters = hasActiveFilters();
   const objectsToRender = getObjectsToRender();
@@ -1421,7 +1430,124 @@ function hasActiveFilters() {
  * @returns {Array<Object>} 当前目录中的可见对象
  */
 function getObjectsToRender() {
-  return hasActiveFilters() ? state.filteredObjects : state.objects;
+  const objects = hasActiveFilters() ? state.filteredObjects : state.objects;
+  return objects
+    .map((object, index) => ({ object, index }))
+    .sort((left, right) => {
+      const result = compareObjects(left.object, right.object, state.currentSort.column);
+      return result || left.index - right.index;
+    })
+    .map(({ object }) => object);
+}
+
+/**
+ * 比较两个对象的排序字段。
+ * @param {Object} left - 左侧对象
+ * @param {Object} right - 右侧对象
+ * @param {string} column - 排序列名
+ * @returns {number} 比较结果
+ */
+function compareObjects(left, right, column) {
+  let result = 0;
+
+  if (column === 'size') {
+    result = getSortableNumber(left.isFolder ? null : left.size)
+      - getSortableNumber(right.isFolder ? null : right.size);
+  } else if (column === 'modified') {
+    result = getSortableDate(left.lastModified) - getSortableDate(right.lastModified);
+  } else {
+    result = getObjectDisplayName(left).localeCompare(
+      getObjectDisplayName(right),
+      'zh-CN',
+      { numeric: true, sensitivity: 'base' }
+    );
+  }
+
+  if (result === 0 && column !== 'name') {
+    result = getObjectDisplayName(left).localeCompare(
+      getObjectDisplayName(right),
+      'zh-CN',
+      { numeric: true, sensitivity: 'base' }
+    );
+  }
+
+  return state.currentSort.direction === 'desc' ? -result : result;
+}
+
+/**
+ * 获取可排序的文件大小，文件夹和缺失值排在文件之前。
+ * @param {number|string|null} value - 文件大小
+ * @returns {number} 用于比较的数值
+ */
+function getSortableNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : -Infinity;
+}
+
+/**
+ * 获取可排序的修改时间，缺失时间排在有效时间之前。
+ * @param {Date|string|null} value - 修改时间
+ * @returns {number} 时间戳
+ */
+function getSortableDate(value) {
+  const timestamp = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(timestamp) ? timestamp : -Infinity;
+}
+
+/**
+ * 处理排序表头点击。
+ * @param {MouseEvent} event - 表头点击事件
+ */
+function handleSortHeaderClick(event) {
+  setSortColumn(event.currentTarget.dataset.sortColumn);
+}
+
+/**
+ * 处理排序表头键盘操作。
+ * @param {KeyboardEvent} event - 表头键盘事件
+ */
+function handleSortHeaderKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') {
+    return;
+  }
+
+  event.preventDefault();
+  setSortColumn(event.currentTarget.dataset.sortColumn);
+}
+
+/**
+ * 设置排序列并重新渲染列表。
+ * @param {string} column - 排序列名
+ */
+function setSortColumn(column) {
+  if (!['name', 'size', 'modified'].includes(column)) {
+    return;
+  }
+
+  if (state.currentSort.column === column) {
+    state.currentSort.direction = state.currentSort.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    state.currentSort = { column, direction: 'asc' };
+  }
+
+  renderObjectList();
+}
+
+/**
+ * 更新表头的排序状态和视觉指示器。
+ */
+function updateSortIndicators() {
+  if (!elements.objectList) {
+    return;
+  }
+
+  elements.objectList.querySelectorAll('th[data-sort-column]').forEach((header) => {
+    const isActive = header.dataset.sortColumn === state.currentSort.column;
+    header.dataset.sortDirection = isActive ? state.currentSort.direction : '';
+    header.setAttribute('aria-sort', isActive
+      ? (state.currentSort.direction === 'asc' ? 'ascending' : 'descending')
+      : 'none');
+  });
 }
 
 /**

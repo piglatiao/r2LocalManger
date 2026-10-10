@@ -537,6 +537,9 @@ class R2Client {
       const contentLength = response.ContentLength || 0;
       let downloadedBytes = 0;
 
+      // 批量下载可能包含远端目录层级，写入前确保本地父目录存在。
+      await fs.promises.mkdir(path.dirname(savePath), { recursive: true });
+
       // Create write stream
       const writeStream = fs.createWriteStream(savePath);
       
