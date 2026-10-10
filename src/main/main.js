@@ -1717,10 +1717,10 @@ function getFileType(filename) {
  */
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 600,
-    minWidth: 800,
-    minHeight: 500,
+    width: 1200,
+    height: 720,
+    minWidth: 1000,
+    minHeight: 600,
     title: UI_TEXT.mainWindowTitle,
     webPreferences: {
       nodeIntegration: true,
@@ -3923,5 +3923,4 @@ function formatBytes(bytes) {
   
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
-
 

@@ -58,6 +58,7 @@ body {
 }
 
 .toolbar-btn {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -67,6 +68,7 @@ body {
   border-radius: 4px;
   cursor: pointer;
   font-size: 14px;
+  white-space: nowrap;
   transition: all 0.2s;
 }
 
@@ -90,6 +92,7 @@ body {
 
 .btn-text {
   font-size: 13px;
+  white-space: nowrap;
 }
 
 /* ==================== 工具栏分隔符 ==================== */
@@ -283,7 +286,8 @@ body {
 }
 
 .page-size-select {
-  min-width: 72px;
+  width: 68px;
+  min-width: 68px;
 }
 
 .view-mode-btn,
